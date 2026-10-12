@@ -80,8 +80,9 @@ fn parse_addr_port(s: &str, ipv6: bool) -> Option<SocketAddr> {
             return None;
         }
         let mut fixed = [0u8; 16];
-        for (i, chunk) in hex_bytes.chunks_exact(8).enumerate() {
-            let word = u32::from_str_radix(std::str::from_utf8(chunk).ok()?, 16).ok()?;
+        let (words, _) = hex_bytes.as_chunks::<8>();
+        for (i, chunk) in words.iter().enumerate() {
+            let word = u32::from_str_radix(std::str::from_utf8(chunk.as_slice()).ok()?, 16).ok()?;
             fixed[i * 4..i * 4 + 4].copy_from_slice(&word.swap_bytes().to_be_bytes());
         }
         IpAddr::V6(Ipv6Addr::from(fixed))
