@@ -29,6 +29,9 @@ jobs:
   build:
     name: Build ${{ matrix.target }}
     runs-on: ubuntu-latest
+    # Release 步骤需要创建 GitHub Release 的写权限
+    permissions:
+      contents: write
     strategy:
       matrix:
         # musl 静态单二进制，覆盖 PRD DEP-01 的两个目标架构
