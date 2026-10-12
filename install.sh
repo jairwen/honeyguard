@@ -2,15 +2,15 @@
 # honeyguard 一键安装脚本（PRD DEP-02/DEP-04）
 #
 # 用法：
-#   curl -fsSL https://raw.githubusercontent.com/<owner>/honeyguard/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/jairwen/honeyguard/main/install.sh | bash
 #   curl -fsSL ... | bash -s -- v0.1.0          # 安装指定版本
 #   ./install.sh --uninstall                    # 卸载（默认保留配置，--purge 连配置一起删）
 #
 # 环境变量：
-#   HONEYGUARD_REPO   GitHub 仓库（owner/name），默认值需替换或通过变量指定
+#   HONEYGUARD_REPO   GitHub 仓库（owner/name），默认 jairwen/honeyguard
 set -euo pipefail
 
-REPO="${HONEYGUARD_REPO:-OWNER/honeyguard}"
+REPO="${HONEYGUARD_REPO:-jairwen/honeyguard}"
 INSTALL_DIR="/usr/local/bin"
 CONFIG_DIR="/etc/honeyguard"
 CONFIG_FILE="$CONFIG_DIR/config.toml"

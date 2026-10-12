@@ -47,8 +47,7 @@ cargo run -- test-alert --config config.example.toml
 一条命令安装（musl 静态二进制 + systemd 托管 + sha256 校验）：
 
 ```bash
-export HONEYGUARD_REPO=<你的GitHub用户名>/honeyguard   # 或编辑脚本内 REPO 变量
-curl -fsSL https://raw.githubusercontent.com/<你的GitHub用户名>/honeyguard/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/jairwen/honeyguard/main/install.sh | bash
 ```
 
 安装脚本会：识别架构 → 下载并校验 → 安装 `/usr/local/bin/honeyguard` → 生成 `/etc/honeyguard/config.toml`（已存在则保留）→ 注册 systemd 服务并启动。卸载：`./install.sh --uninstall`（加 `--purge` 连配置一起删）。
