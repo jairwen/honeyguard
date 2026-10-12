@@ -64,4 +64,4 @@ journalctl -u honeyguard -f            # 3. 观察日志
 
 ## License
 
-TBD
+MIT
