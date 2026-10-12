@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint-test:
+    name: Lint & Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --all
+
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # musl 静态单二进制，覆盖 PRD DEP-01 的两个目标架构
+        target:
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+      - name: Build
+        run: cross build --release --target ${{ matrix.target }}
+      - name: Package
+        run: |
+          set -eu
+          target="${{ matrix.target }}"
+          mkdir -p "dist/honeyguard-${target}"
+          cp "target/${target}/release/honeyguard" "dist/honeyguard-${target}/"
+          cp config.example.toml README.md "dist/honeyguard-${target}/"
+          tar -czf "honeyguard-${target}.tar.gz" -C dist "honeyguard-${target}"
+          shasum -a 256 "honeyguard-${target}.tar.gz" > "honeyguard-${target}.tar.gz.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: honeyguard-${{ matrix.target }}
+          path: |
+            honeyguard-${{ matrix.target }}.tar.gz
+            honeyguard-${{ matrix.target }}.tar.gz.sha256
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            honeyguard-${{ matrix.target }}.tar.gz
+            honeyguard-${{ matrix.target }}.tar.gz.sha256

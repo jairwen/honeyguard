@@ -1,0 +1,37 @@
+[package]
+name = "honeyguard"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+base64 = "0.23.1"
+chrono = "0.4.45"
+clap = { version = "4.6.7", features = ["derive"] }
+glob = "0.3.4"
+hmac = "0.13.0"
+hostname = "0.4.2"
+ipnet = "2.12.2"
+percent-encoding = "2.3.2"
+regex = "1.13.1"
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider", "json"] }
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+rustls = { version = "0.23.45", default-features = false, features = ["ring", "std"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sha2 = "0.11.0"
+tokio = { version = "1.53.2", features = ["rt-multi-thread", "macros", "time", "signal", "sync", "test-util", "process", "fs", "io-util"] }
+tokio-util = "0.7.20"
+toml = "1.1.8"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+uuid = { version = "1.28.0", features = ["v4"] }
+
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1
+
+[dev-dependencies]
+tempfile = "3.27.0"
+

@@ -1,0 +1,108 @@
+# honeyguard 配置示例
+# 复制到 /etc/honeyguard/config.toml 后按需修改；所有段都有默认值，可整体省略。
+# 字段说明见 docs/PRD.md 附录 A。
+
+[server]
+# 展示用主机名，留空自动取系统主机名
+host = ""
+
+[alert]
+# 最低推送级别：info | warning | critical（低于该级别的只记日志不推送）
+min_level = "warning"
+# 每分钟最多出站告警条数（critical 不受限流约束）
+rate_limit_per_min = 10
+# 同类事件聚合窗口（秒）：窗口内首条立即推送，后续合并为一条摘要
+aggregate_window_sec = 300
+# 同类告警推送后的静默期（秒），0 = 关闭
+silence_sec = 1800
+
+# 心跳报平安（默认关；开启后按周期推送存活通知，长时间收不到说明 agent/服务器挂了）
+[alert.heartbeat]
+enabled = false
+interval_sec = 86400
+
+# 每日摘要（默认关；每天固定时间推送过去 24h 告警统计与高频来源）
+[alert.digest]
+enabled = false
+at_hour = 8
+
+# ---------- 推送目标（可配置多个，全部并发投递） ----------
+
+# 方式一：自定义 Webhook（钉钉/飞书/企业微信/Slack 之外的任意 JSON 接口）
+[[alert.webhooks]]
+provider = "custom"
+url = "https://example.com/your-webhook-endpoint"
+# 可用变量：{{event_id}} {{level}} {{title}} {{body}} {{host}} {{time}} {{detector}}
+template = '{"text": "[{{level}}] {{title}} @{{host}}\n{{body}}"}'
+
+# 方式二：钉钉机器人（安全设置选“加签”，密钥填到 secret）
+# [[alert.webhooks]]
+# provider = "dingtalk"
+# url = "https://oapi.dingtalk.com/robot/send?access_token=xxxxxxxx"
+# secret = "SECxxxxxxxx"
+
+# 方式三：飞书群机器人
+# [[alert.webhooks]]
+# provider = "feishu"
+# url = "https://open.feishu.cn/open-apis/bot/v2/hook/xxxxxxxx"
+
+# 方式四：企业微信群机器人
+# [[alert.webhooks]]
+# provider = "wecom"
+# url = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxxxxxxx"
+
+# 方式五：Slack Incoming Webhook
+# [[alert.webhooks]]
+# provider = "slack"
+# url = "https://hooks.slack.com/services/XXX/YYY/ZZZ"
+
+[detector.ssh_bruteforce]
+enabled = true
+# 时间窗口内同一来源 IP 认证失败达到阈值 → critical
+window_sec = 600
+max_failures = 20
+
+[detector.ssh_login]
+enabled = true
+# all = 每次登录成功都通知；new_ip = 仅首次出现的 IP；off = 关闭
+mode = "all"
+
+[detector.outbound]
+enabled = true
+interval_sec = 30
+# 常见矿池/stratum 端口（可增删）
+bad_ports = [3333, 4444, 5555, 7777, 8888, 14433, 14444]
+# 本地恶意 IP/CIDR 黑名单文件（每行一个 IP 或 CIDR）
+blocklist_files = []
+
+[detector.process]
+enabled = true
+interval_sec = 30
+# CPU 占用（%）持续超阈值达 duration_sec 且命中挖矿特征 → critical
+cpu_threshold = 80
+duration_sec = 300
+
+# 关键文件完整性与持久化痕迹（authorized_keys/shadow/cron/systemd 变更、
+# 新增可登录用户、新增 SUID 文件）。首轮建基线，之后变化才告警
+[detector.file_integrity]
+enabled = true
+interval_sec = 60
+# 受控路径（glob 语法）；留空使用内置默认清单（passwd/shadow/sudoers/authorized_keys/
+# crontab/cron.d/systemd unit 等）。authorized_keys、shadow、sudoers 变更为 critical
+watch = []
+# 在默认清单之外追加
+extra_watch = []
+# 新增 SUID 文件扫描目录
+suid_dirs = ["/usr/bin", "/usr/sbin", "/usr/local/bin", "/usr/local/sbin", "/tmp", "/var/tmp", "/dev/shm"]
+
+# 新增监听端口告警（后门/反弹 shell 的常见前置动作）。首轮建基线，之后新端口才告警
+[detector.listen_ports]
+enabled = true
+interval_sec = 60
+
+[whitelist]
+# 命中白名单的事件不推送（仅记录本地日志）；M1 生效
+ips = []          # CIDR，如 ["203.0.113.0/24"]
+users = []
+paths = []        # glob，如 ["/var/lib/*/tmp/*"]
+processes = []
