@@ -303,7 +303,7 @@ impl Default for ListenPortsCfg {
 pub struct BehaviorCfg {
     pub enabled: bool,
     pub interval_sec: u64,
-    /// 每个进程的学习期（秒）：期内只记录其通信对象，不告警。默认 7 天。
+    /// 每个进程的学习期（秒）：期内只记录其通信对象，不告警。默认 3 天。
     pub learn_sec: u64,
     /// 远端 IP 去重数达到该阈值即判为“广泛连接型”（P2P/BT 等），
     /// 之后陌生 IP 不再告警，改为监控并发激增。
@@ -319,7 +319,7 @@ impl Default for BehaviorCfg {
         Self {
             enabled: true,
             interval_sec: 60,
-            learn_sec: 7 * 86400,
+            learn_sec: 3 * 86400,
             p2p_ip_threshold: 50,
             spike_factor: 4,
             spike_min: 40,

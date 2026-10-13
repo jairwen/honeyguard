@@ -108,7 +108,7 @@ interval_sec = 60
 [detector.behavior]
 enabled = true
 interval_sec = 60
-learn_sec = 604800          # 学习期 7 天
+learn_sec = 259200          # 学习期 3 天
 p2p_ip_threshold = 50       # 判为广泛连接型的远端 IP 去重数阈值
 spike_factor = 4            # 并发达历史峰值 N 倍触发告警
 spike_min = 40              # 并发激增告警的绝对下限
