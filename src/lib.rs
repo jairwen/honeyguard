@@ -11,6 +11,7 @@ pub mod alert;
 pub mod collectors;
 pub mod config;
 pub mod detectors;
+pub mod egress;
 pub mod logging;
 pub mod notify;
 pub mod store;

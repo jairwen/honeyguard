@@ -5,6 +5,9 @@
 [server]
 # 展示用主机名，留空自动取系统主机名
 host = ""
+# 告警主机名追加出口公网 IP，显示为 NODEA(1.2.3.4)
+# 通过 api.ipify.org / ip.sb / ifconfig.me 探测（多源回退），默认开启
+egress_ip = true
 
 [alert]
 # 最低推送级别：info | warning | critical（低于该级别的只记日志不推送）

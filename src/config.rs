@@ -18,11 +18,23 @@ pub struct Config {
     pub whitelist: WhitelistCfg,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct ServerCfg {
     /// 展示用主机名，留空取系统主机名。
     pub host: Option<String>,
+    /// 告警主机名追加出口公网 IP（显示为 `NODEA(1.2.3.4)`）。
+    /// 通过 api.ipify.org / ip.sb / ifconfig.me 探测，默认开启。
+    pub egress_ip: bool,
+}
+
+impl Default for ServerCfg {
+    fn default() -> Self {
+        Self {
+            host: None,
+            egress_ip: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

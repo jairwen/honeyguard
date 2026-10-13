@@ -113,7 +113,7 @@ async fn cmd_run(cli: &Cli) -> Result<()> {
     let (notifier, done) = Notifier::start(
         cfg.alert.clone(),
         cfg.alert.webhooks.clone(),
-        Delivery::Webhook(client),
+        Delivery::Webhook(client.clone()),
         store.clone(),
     );
     tracing::info!(
@@ -209,6 +209,15 @@ async fn cmd_run(cli: &Cli) -> Result<()> {
             "report",
             token,
             move |t| detectors::report::run(hb, dg, n.clone(), st.clone(), t),
+        )));
+    }
+    if cfg.server.egress_ip {
+        let token = shutdown_token.clone();
+        let egress_client = client.clone();
+        detector_tasks.push(tokio::spawn(detectors::supervised(
+            "egress",
+            token,
+            move |t| honeyguard::egress::run(egress_client.clone(), t),
         )));
     }
 
@@ -432,7 +441,15 @@ async fn cmd_test_alert(cli: &Cli) -> Result<()> {
         bail!("配置中没有任何 [[alert.webhooks]]，请先在配置文件中配置推送目标");
     }
     let client = webhook::http_client();
-    println!("发送测试告警到 {} 个 Webhook…\n", cfg.alert.webhooks.len());
+    // 尽力探测一次出口 IP，让测试告警也带上 NODEA(x.x.x.x) 标识
+    if cfg.server.egress_ip {
+        let _ = honeyguard::egress::refresh(&client).await;
+    }
+    println!(
+        "发送测试告警到 {} 个 Webhook…（主机标识：{}）",
+        cfg.alert.webhooks.len(),
+        alert::host()
+    );
     let mut failed = 0usize;
     for level in [Level::Info, Level::Warning, Level::Critical] {
         let alert = Alert::new(

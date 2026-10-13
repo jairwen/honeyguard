@@ -306,6 +306,7 @@ honeyguard version
 # /etc/honeyguard/config.toml
 [server]
 host = ""            # 留空自动取 hostname
+egress_ip = true     # 告警主机名追加出口公网 IP：NODEA(1.2.3.4)
 
 [alert]
 min_level = "warning"        # 只推送该级别以上：info | warning | critical

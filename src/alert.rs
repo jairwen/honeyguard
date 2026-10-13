@@ -3,23 +3,42 @@
 use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::sync::OnceLock;
+use std::sync::{OnceLock, RwLock};
 
 /// 主机名缓存：配置加载时写入，未设置时回退系统主机名。
 static HOST: OnceLock<String> = OnceLock::new();
+
+/// 出口公网 IP 缓存（egress 探测任务定期刷新；None = 未探测到/未启用）。
+static EGRESS_IP: RwLock<Option<String>> = RwLock::new(None);
 
 /// 设置全局主机名（配置 `server.host` 非空时调用一次）。
 pub fn set_host(host: impl Into<String>) {
     let _ = HOST.set(host.into());
 }
 
-/// 获取本机展示名。
+/// 更新出口公网 IP 展示值。
+pub fn set_egress_ip(ip: Option<String>) {
+    if let Ok(mut guard) = EGRESS_IP.write() {
+        *guard = ip;
+    }
+}
+
+/// 当前出口公网 IP（未探测到为 None）。
+pub fn egress_ip() -> Option<String> {
+    EGRESS_IP.read().ok().and_then(|g| g.clone())
+}
+
+/// 获取本机展示名：`NODEA(203.0.113.4)`（配置名/主机名 + 出口 IP，IP 未知时只有名字）。
 pub fn host() -> String {
-    HOST.get().cloned().unwrap_or_else(|| {
+    let base = HOST.get().cloned().unwrap_or_else(|| {
         hostname::get()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|_| "unknown".into())
-    })
+    });
+    match egress_ip() {
+        Some(ip) => format!("{base}({ip})"),
+        None => base,
+    }
 }
 
 /// 告警级别，顺序即严重程度：Info < Warning < Critical。
