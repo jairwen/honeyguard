@@ -66,8 +66,23 @@ pub fn mirror_candidates(configured: Option<&str>) -> Vec<String> {
     }
 }
 
-/// 依次尝试候选 URL 下载，任一成功即写入 dest；全部失败返回聚合错误。
-async fn download_any(client: &reqwest::Client, urls: &[String], dest: &Path) -> Result<()> {
+/// 校验安装包内容：gzip 魔数（镜像可能返回 200 的 HTML 错误页）。
+fn valid_gzip(bytes: &[u8]) -> bool {
+    bytes.len() > 2 && bytes[0] == 0x1f && bytes[1] == 0x8b
+}
+
+/// 校验 sha256 文件内容：以 64 位十六进制摘要开头。
+fn valid_sha_file(bytes: &[u8]) -> bool {
+    bytes.len() >= 64 && bytes[..64].iter().all(|b| b.is_ascii_hexdigit())
+}
+
+/// 依次尝试候选 URL 下载（内容须通过 validator），任一成功即写入 dest。
+async fn download_any(
+    client: &reqwest::Client,
+    urls: &[String],
+    dest: &Path,
+    validator: fn(&[u8]) -> bool,
+) -> Result<()> {
     let mut errors = Vec::new();
     for url in urls {
         match client.get(url).send().await {
@@ -76,6 +91,10 @@ async fn download_any(client: &reqwest::Client, urls: &[String], dest: &Path) ->
                     .bytes()
                     .await
                     .with_context(|| format!("读取下载内容失败: {url}"))?;
+                if !validator(&bytes) {
+                    errors.push(format!("{url} → 内容不合法（镜像返回了错误页？）"));
+                    continue;
+                }
                 std::fs::write(dest, &bytes)
                     .with_context(|| format!("写入 {} 失败", dest.display()))?;
                 tracing::debug!(url, "下载成功");
@@ -323,8 +342,8 @@ pub async fn run(check_only: bool, mirror: Option<&str>) -> Result<()> {
     let binary = work_dir.join("honeyguard");
 
     println!("下载 v{latest}（{target}，直连失败自动切换镜像）…");
-    download_any(&client, &pkg_urls, &pkg).await?;
-    download_any(&client, &sha_urls, &sha).await?;
+    download_any(&client, &pkg_urls, &pkg, valid_gzip).await?;
+    download_any(&client, &sha_urls, &sha, valid_sha_file).await?;
     verify_sha256(&pkg, &sha)?;
     println!("sha256 校验通过");
     extract_binary(&pkg, &binary)?;
@@ -383,6 +402,18 @@ mod tests {
             vec!["https://my.proxy.com/".to_string()],
             "结尾斜杠归一"
         );
+    }
+
+    #[test]
+    fn content_validators_reject_html_pages() {
+        let html = b"<!DOCTYPE html><html>blocked</html>";
+        assert!(!valid_gzip(html), "HTML 不是合法安装包");
+        assert!(!valid_sha_file(html), "HTML 不是合法校验文件");
+        let gz = [0x1f, 0x8b, 0x08, 0x00];
+        assert!(valid_gzip(&gz));
+        let sha = b"94176d686473f905c7e64a2ef0a5a52e7194e02b7b8442b4ba7c941f10d589db  pkg";
+        assert!(valid_sha_file(sha));
+        assert!(!valid_sha_file(b"short"));
     }
 
     #[test]

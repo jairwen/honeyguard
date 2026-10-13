@@ -59,14 +59,19 @@ mirror_list() {
   fi
 }
 
-# fetch_file <url> <dest>：依次尝试镜像下载
+# ---- 下载内容校验：镜像可能返回 200 的 HTML 错误页，必须验证真实内容 ----
+valid_pkg() { head -c 2 "$1" | od -An -tx1 | grep -q '1f 8b'; }              # gzip 魔数
+valid_sha() { head -c 64 "$1" | grep -Eq '^[0-9a-fA-F]{64}$'; }              # 64 位十六进制
+
+# fetch_file <url> <dest> <validator>：依次尝试镜像下载并校验内容
 fetch_file() {
-  local url="$1" dest="$2" m
+  local url="$1" dest="$2" validator="$3" m
   for m in $(mirror_list); do
-    if curl -fsSL --connect-timeout 10 "${m}${url}" -o "$dest"; then
+    if curl -fsSL --connect-timeout 10 "${m}${url}" -o "$dest" && "$validator" "$dest"; then
       [ -z "$m" ] || log "经镜像下载成功: ${m%/}"
       return 0
     fi
+    log "源不健康，切换下一个: ${m:-直连}"
   done
   return 1
 }
@@ -102,8 +107,8 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
 log "下载 honeyguard v$VERSION ($TARGET)（直连失败自动切换镜像）…"
-fetch_file "$BASE_URL.tar.gz"        "$TMP/pkg.tar.gz"  || die "下载失败（可设置 HONEYGUARD_MIRROR 指定镜像）"
-fetch_file "$BASE_URL.tar.gz.sha256" "$TMP/pkg.sha256"  || die "下载校验文件失败"
+fetch_file "$BASE_URL.tar.gz"        "$TMP/pkg.tar.gz"  valid_pkg || die "下载失败（可设置 HONEYGUARD_MIRROR 指定镜像）"
+fetch_file "$BASE_URL.tar.gz.sha256" "$TMP/pkg.sha256"  valid_sha || die "下载校验文件失败"
 
 # ---- sha256 校验 ----
 EXPECTED="$(awk '{print $1}' "$TMP/pkg.sha256")"
