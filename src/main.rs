@@ -47,6 +47,12 @@ enum Command {
     },
     /// 环境自检：配置、权限、日志源、状态库、Webhook 连通性
     Doctor,
+    /// 自更新到最新 Release（下载、sha256 校验、原子替换并重启服务）
+    Update {
+        /// 只检查是否有新版本，不执行更新
+        #[arg(long)]
+        check: bool,
+    },
     /// 打印版本信息
     Version,
 }
@@ -61,6 +67,7 @@ async fn main() -> Result<()> {
         Command::TestAlert => cmd_test_alert(&cli).await,
         Command::Baseline { .. } => cmd_baseline(&cli),
         Command::Doctor => cmd_doctor(&cli).await,
+        Command::Update { check } => honeyguard::update::run(check).await,
         Command::Version => {
             println!(
                 "honeyguard {} ({} {})",

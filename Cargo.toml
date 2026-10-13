@@ -8,6 +8,7 @@ anyhow = "1.0.104"
 base64 = "0.23.1"
 chrono = "0.4.45"
 clap = { version = "4.6.7", features = ["derive"] }
+flate2 = "1.1.10"
 glob = "0.3.4"
 hmac = "0.13.0"
 hostname = "0.4.2"
@@ -20,6 +21,7 @@ rustls = { version = "0.23.45", default-features = false, features = ["ring", "s
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha2 = "0.11.0"
+tar = "0.4.46"
 tokio = { version = "1.53.2", features = ["rt-multi-thread", "macros", "time", "signal", "sync", "test-util", "process", "fs", "io-util"] }
 tokio-util = "0.7.20"
 toml = "1.1.8"

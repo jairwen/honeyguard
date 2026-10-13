@@ -14,4 +14,5 @@ pub mod detectors;
 pub mod logging;
 pub mod notify;
 pub mod store;
+pub mod update;
 pub mod whitelist;

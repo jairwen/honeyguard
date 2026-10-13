@@ -22,7 +22,7 @@
 | DET-06 新增监听端口告警（含归属进程） | ✅ |
 | DET-09 行为基线：长期学习进程通信画像，陌生通信对象/新进程外连告警，P2P 类自动识别并转为并发激增监控 | ✅ |
 | 心跳报平安 + 每日摘要 | ✅ |
-| `baseline` 重建基线 / `doctor` 环境自检 | ✅ |
+| `baseline` 重建基线 / `doctor` 环境自检 / `update` 自更新 | ✅ |
 | eBPF 实时审计（exec / connect / DNS） | M3 |
 
 ## 开发
@@ -60,6 +60,8 @@ vim /etc/honeyguard/config.toml        # 1. 填入你的 Webhook
 honeyguard test-alert                  # 2. 验证推送通道
 journalctl -u honeyguard -f            # 3. 观察日志
 ```
+
+**升级**：`sudo honeyguard update` 一条命令完成（查最新 Release → 下载 → sha256 校验 → 原子替换 → 自动重启服务）；`honeyguard update --check` 只看有没有新版。
 
 也可以从源码构建：`cargo build --release`（CI 会在打 `v*` tag 时自动构建双架构产物并发 Release）。
 

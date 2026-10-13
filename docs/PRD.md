@@ -212,6 +212,7 @@ honeyguard once          # 跑一轮全量检测立即退出（调试/验证用�
 honeyguard test-alert    # 向已配置的 Webhook 发送三级测试告警
 honeyguard baseline update [--force]   # 重建文件/端口基线（P1）
 honeyguard doctor        # 环境自检：日志源、权限、网络、Webhook 连通性（P1）
+honeyguard update [--check]  # 自更新到最新 Release；--check 只检查不更新（P1）
 honeyguard status        # 通过 Unix socket 查询运行状态与统计（P1）
 honeyguard version
 ```
@@ -225,7 +226,7 @@ honeyguard version
 |---|---|---|
 | DEP-01 | musl 静态单二进制：x86_64 + aarch64，GitHub Releases 分发 | P0 |
 | DEP-02 | `install.sh` 一键安装：`curl -fsSL ... | bash` | P0 |
-| DEP-03 | 升级路径：重跑 install.sh 或 deb 包 | P1 |
+| DEP-03 | 升级路径：`honeyguard update` 自更新（查最新 Release → 下载 → sha256 校验 → 原子替换 → 重启服务）；`--check` 只检查；或重跑 install.sh | P1 |
 | DEP-04 | 干净卸载：`install.sh --uninstall`（停服务、删二进制/配置可选保留） | P0 |
 
 - install.sh 职责：识别架构 → 下载对应二进制（校验 sha256）→ 安装到 `/usr/local/bin/honeyguard` → 生成带注释的默认配置（不覆盖已存在配置）→ 安装 systemd unit（`Restart=always`，`After=network-online.target`）→ `systemctl enable --now honeyguard` → 提示 `test-alert` 验证。

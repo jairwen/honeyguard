@@ -129,4 +129,5 @@ cat <<EOF
   1. 编辑 $CONFIG_FILE 填入你的 Webhook（钉钉/飞书/企业微信/Slack/自定义）
   2. 发送测试告警验证通道: $INSTALL_DIR/honeyguard test-alert
   3. 查看日志: journalctl -u $SERVICE -f
+后续升级一条命令: sudo honeyguard update（或 honeyguard update --check 先看有没有新版）
 EOF
