@@ -49,21 +49,54 @@ esac
 
 [ "$REPO" != "OWNER/honeyguard" ] || die "请先设置仓库：export HONEYGUARD_REPO=<你的GitHub用户名>/honeyguard，或编辑脚本顶部的 REPO 变量"
 
+# ---- 镜像候选：HONEYGUARD_MIRROR 指定时只用它；否则直连优先 + 公共加速回退 ----
+MIRROR="${HONEYGUARD_MIRROR:-}"
+mirror_list() {
+  if [ -n "$MIRROR" ]; then
+    printf '%s\n' "${MIRROR%/}/"
+  else
+    printf '%s\n' "" "https://ghproxy.com/" "https://gh-proxy.com/" "https://ghfast.top/"
+  fi
+}
+
+# fetch_file <url> <dest>：依次尝试镜像下载
+fetch_file() {
+  local url="$1" dest="$2" m
+  for m in $(mirror_list); do
+    if curl -fsSL --connect-timeout 10 "${m}${url}" -o "$dest"; then
+      [ -z "$m" ] || log "经镜像下载成功: ${m%/}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# fetch_stdout <url>：依次尝试镜像，成功输出响应体
+fetch_stdout() {
+  local url="$1" m
+  for m in $(mirror_list); do
+    if curl -fsSL --connect-timeout 10 "${m}${url}"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 # ---- 版本解析：参数指定 > 最新 release ----
 VERSION="${1:-}"
 if [ -z "$VERSION" ]; then
   log "查询最新版本…"
-  VERSION="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" | grep -o '"tag_name": *"[^"]*"' | head -1 | sed 's/.*"v\([^"]*\)"/\1/')"
-  [ -n "$VERSION" ] || die "无法获取最新版本（仓库 $REPO 是否已有 release？）"
+  VERSION="$(fetch_stdout "https://api.github.com/repos/$REPO/releases/latest" | grep -o '"tag_name": *"[^"]*"' | head -1 | sed 's/.*"v\([^"]*\)"/\1/')"
+  [ -n "$VERSION" ] || die "无法获取最新版本（仓库 $REPO 是否已有 release？网络不通可设置 HONEYGUARD_MIRROR）"
 fi
 
 BASE_URL="https://github.com/$REPO/releases/download/v$VERSION/honeyguard-$TARGET"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
-log "下载 honeyguard v$VERSION ($TARGET)…"
-curl -fsSL "$BASE_URL.tar.gz"     -o "$TMP/pkg.tar.gz"     || die "下载失败：$BASE_URL.tar.gz"
-curl -fsSL "$BASE_URL.tar.gz.sha256" -o "$TMP/pkg.sha256"  || die "下载校验文件失败"
+log "下载 honeyguard v$VERSION ($TARGET)（直连失败自动切换镜像）…"
+fetch_file "$BASE_URL.tar.gz"        "$TMP/pkg.tar.gz"  || die "下载失败（可设置 HONEYGUARD_MIRROR 指定镜像）"
+fetch_file "$BASE_URL.tar.gz.sha256" "$TMP/pkg.sha256"  || die "下载校验文件失败"
 
 # ---- sha256 校验 ----
 EXPECTED="$(awk '{print $1}' "$TMP/pkg.sha256")"

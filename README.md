@@ -61,7 +61,7 @@ honeyguard test-alert                  # 2. 验证推送通道
 journalctl -u honeyguard -f            # 3. 观察日志
 ```
 
-**升级**：`sudo honeyguard update` 一条命令完成（查最新 Release → 下载 → sha256 校验 → 原子替换 → 自动重启服务）；`honeyguard update --check` 只看有没有新版。
+**升级**：`sudo honeyguard update` 一条命令完成（查最新 Release → 下载 → sha256 校验 → 原子替换 → 自动重启服务）；`honeyguard update --check` 只看有没有新版。国内节点直连 GitHub 不通时会自动回退公共加速镜像；也可显式配置 `server.update_mirror`（或环境变量 `HONEYGUARD_MIRROR`，如 `https://ghproxy.com/`），自建反代更稳更安全（sha256 校验防传输损坏，但镜像本身是信任点）。
 
 也可以从源码构建：`cargo build --release`（CI 会在打 `v*` tag 时自动构建双架构产物并发 Release）。
 

@@ -33,46 +33,104 @@ pub fn is_newer(latest: &str, current: &str) -> Option<bool> {
 }
 
 /// 查询 GitHub 最新 Release 的版本号（已去除 v 前缀）。
-async fn fetch_latest_version(client: &reqwest::Client, repo: &str) -> Result<String> {
-    let url = format!("https://api.github.com/repos/{repo}/releases/latest");
-    let resp = client
-        .get(&url)
-        .header("Accept", "application/vnd.github+json")
-        .send()
-        .await
-        .with_context(|| format!("查询 {url} 失败"))?;
-    let status = resp.status();
-    if !status.is_success() {
-        bail!("GitHub API 返回 {status}（仓库尚无 Release？）");
+/// 内置镜像候选链：直连优先，其后为国内可用的公共 GitHub 加速（前缀风格，
+/// 拼接为 `{mirror}https://github.com/...`）。可用性随时间变化，均失败时可用
+/// `HONEYGUARD_MIRROR` 或配置 `server.update_mirror` 指定自建镜像。
+const BUILTIN_MIRRORS: &[&str] = &[
+    "", // 直连
+    "https://ghproxy.com/",
+    "https://gh-proxy.com/",
+    "https://ghfast.top/",
+];
+
+/// 解析镜像候选：显式指定（env > 配置）时只用该镜像，否则内置链。
+pub fn mirror_candidates(configured: Option<&str>) -> Vec<String> {
+    let explicit = std::env::var("HONEYGUARD_MIRROR")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| {
+            configured
+                .map(str::to_string)
+                .filter(|s| !s.trim().is_empty())
+        });
+    match explicit {
+        Some(mirror) => {
+            let mirror = mirror.trim_end_matches('/').to_string();
+            if mirror.is_empty() {
+                BUILTIN_MIRRORS.iter().map(|s| s.to_string()).collect()
+            } else {
+                vec![format!("{mirror}/")]
+            }
+        }
+        None => BUILTIN_MIRRORS.iter().map(|s| s.to_string()).collect(),
     }
-    let body: serde_json::Value = resp.json().await.context("解析 GitHub API 响应失败")?;
-    let tag = body
-        .get("tag_name")
-        .and_then(|t| t.as_str())
-        .map(|s| s.trim().trim_start_matches('v').to_string())
-        .unwrap_or_default();
-    if tag.is_empty() {
-        bail!("Release 响应缺少 tag_name");
-    }
-    Ok(tag)
 }
 
-async fn download(client: &reqwest::Client, url: &str, dest: &Path) -> Result<()> {
-    let resp = client
-        .get(url)
-        .send()
-        .await
-        .with_context(|| format!("下载失败: {url}"))?;
-    let status = resp.status();
-    if !status.is_success() {
-        bail!("下载 {url} 返回 {status}");
+/// 依次尝试候选 URL 下载，任一成功即写入 dest；全部失败返回聚合错误。
+async fn download_any(client: &reqwest::Client, urls: &[String], dest: &Path) -> Result<()> {
+    let mut errors = Vec::new();
+    for url in urls {
+        match client.get(url).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                let bytes = resp
+                    .bytes()
+                    .await
+                    .with_context(|| format!("读取下载内容失败: {url}"))?;
+                std::fs::write(dest, &bytes)
+                    .with_context(|| format!("写入 {} 失败", dest.display()))?;
+                tracing::debug!(url, "下载成功");
+                return Ok(());
+            }
+            Ok(resp) => errors.push(format!("{url} → HTTP {}", resp.status())),
+            Err(err) => errors.push(format!("{url} → {err}")),
+        }
     }
-    let bytes = resp
-        .bytes()
-        .await
-        .with_context(|| format!("读取下载内容失败: {url}"))?;
-    std::fs::write(dest, &bytes).with_context(|| format!("写入 {} 失败", dest.display()))?;
-    Ok(())
+    bail!("全部下载源失败：{}", errors.join("；"));
+}
+
+async fn fetch_latest_version(
+    client: &reqwest::Client,
+    repo: &str,
+    mirrors: &[String],
+) -> Result<String> {
+    let urls: Vec<String> = mirrors
+        .iter()
+        .map(|m| format!("{m}https://api.github.com/repos/{repo}/releases/latest"))
+        .collect();
+    let mut errors = Vec::new();
+    for url in &urls {
+        match client
+            .get(url)
+            .header("Accept", "application/vnd.github+json")
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => {
+                match resp.json::<serde_json::Value>().await {
+                    // 镜像不健康时会返回 HTML/空体，解析失败计入错误继续回退
+                    Ok(body) => {
+                        let tag = body
+                            .get("tag_name")
+                            .and_then(|t| t.as_str())
+                            .map(|s| s.trim().trim_start_matches('v').to_string())
+                            .unwrap_or_default();
+                        if tag.is_empty() {
+                            errors.push(format!("{url} → 响应缺少 tag_name"));
+                            continue;
+                        }
+                        return Ok(tag);
+                    }
+                    Err(err) => errors.push(format!("{url} → 响应非 JSON（镜像不健康？{err}）")),
+                }
+            }
+            Ok(resp) => errors.push(format!("{url} → HTTP {}", resp.status())),
+            Err(err) => errors.push(format!("{url} → {err}")),
+        }
+    }
+    bail!(
+        "查询最新版本失败（可设置 HONEYGUARD_MIRROR 或 server.update_mirror 指定镜像）：{}",
+        errors.join("；")
+    );
 }
 
 fn sha256_hex(data: &[u8]) -> String {
@@ -188,13 +246,14 @@ fn restart_service() {
     }
 }
 
-pub async fn run(check_only: bool) -> Result<()> {
+pub async fn run(check_only: bool, mirror: Option<&str>) -> Result<()> {
     let repo = repo();
     let current = env!("CARGO_PKG_VERSION");
     let client = crate::notify::webhook::http_client();
+    let mirrors = mirror_candidates(mirror);
 
     println!("当前版本 v{current}，查询最新 Release（{repo}）…");
-    let latest = fetch_latest_version(&client, &repo).await?;
+    let latest = fetch_latest_version(&client, &repo, &mirrors).await?;
     let newer = is_newer(&latest, current)
         .with_context(|| format!("无法比较版本: latest={latest} current={current}"))?;
     if !newer {
@@ -216,6 +275,14 @@ pub async fn run(check_only: bool) -> Result<()> {
 
     let target = musl_target()?;
     let base = format!("https://github.com/{repo}/releases/download/v{latest}/honeyguard-{target}");
+    let pkg_urls: Vec<String> = mirrors
+        .iter()
+        .map(|m| format!("{m}{base}.tar.gz"))
+        .collect();
+    let sha_urls: Vec<String> = mirrors
+        .iter()
+        .map(|m| format!("{m}{base}.tar.gz.sha256"))
+        .collect();
     let work_dir = std::env::temp_dir().join(format!("honeyguard-update-{}", std::process::id()));
     std::fs::create_dir_all(&work_dir).context("创建临时目录失败")?;
     let scope = RunScope(work_dir.clone());
@@ -224,9 +291,9 @@ pub async fn run(check_only: bool) -> Result<()> {
     let sha = work_dir.join("pkg.sha256");
     let binary = work_dir.join("honeyguard");
 
-    println!("下载 v{latest}（{target}）…");
-    download(&client, &format!("{base}.tar.gz"), &pkg).await?;
-    download(&client, &format!("{base}.tar.gz.sha256"), &sha).await?;
+    println!("下载 v{latest}（{target}，直连失败自动切换镜像）…");
+    download_any(&client, &pkg_urls, &pkg).await?;
+    download_any(&client, &sha_urls, &sha).await?;
     verify_sha256(&pkg, &sha)?;
     println!("sha256 校验通过");
     extract_binary(&pkg, &binary)?;
@@ -262,6 +329,29 @@ mod tests {
             "数值比较而非字符串"
         );
         assert_eq!(is_newer("v1.0.0", "0.2.0"), Some(true));
+    }
+
+    #[test]
+    fn mirror_candidates_configuration() {
+        let auto = mirror_candidates(None);
+        assert_eq!(
+            auto.first().map(String::as_str),
+            Some(""),
+            "自动模式直连优先"
+        );
+        assert!(auto.len() >= 3, "应内置至少两个公共镜像回退");
+        let fixed = mirror_candidates(Some("https://my.proxy.com"));
+        assert_eq!(
+            fixed,
+            vec!["https://my.proxy.com/".to_string()],
+            "显式指定只用该镜像"
+        );
+        let trimmed = mirror_candidates(Some("https://my.proxy.com//"));
+        assert_eq!(
+            trimmed,
+            vec!["https://my.proxy.com/".to_string()],
+            "结尾斜杠归一"
+        );
     }
 
     #[test]

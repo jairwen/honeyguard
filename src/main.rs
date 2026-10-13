@@ -67,7 +67,13 @@ async fn main() -> Result<()> {
         Command::TestAlert => cmd_test_alert(&cli).await,
         Command::Baseline { .. } => cmd_baseline(&cli),
         Command::Doctor => cmd_doctor(&cli).await,
-        Command::Update { check } => honeyguard::update::run(check).await,
+        Command::Update { check } => {
+            // update 不依赖完整配置可用：镜像设置尽力读取，配置坏了也能升级
+            let mirror = load_config(&cli.config)
+                .ok()
+                .and_then(|cfg| cfg.server.update_mirror);
+            honeyguard::update::run(check, mirror.as_deref()).await
+        }
         Command::Version => {
             println!(
                 "honeyguard {} ({} {})",

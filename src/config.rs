@@ -26,6 +26,9 @@ pub struct ServerCfg {
     /// 告警主机名追加出口公网 IP（显示为 `NODEA(1.2.3.4)`）。
     /// 通过 api.ipify.org / ip.sb / ifconfig.me 探测，默认开启。
     pub egress_ip: bool,
+    /// GitHub 加速镜像前缀（`honeyguard update` 下载用），如 "https://ghproxy.com/"。
+    /// 留空则直连优先、失败后自动尝试内置公共镜像；环境变量 HONEYGUARD_MIRROR 优先于此。
+    pub update_mirror: Option<String>,
 }
 
 impl Default for ServerCfg {
@@ -33,6 +36,7 @@ impl Default for ServerCfg {
         Self {
             host: None,
             egress_ip: true,
+            update_mirror: None,
         }
     }
 }
