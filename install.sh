@@ -82,12 +82,17 @@ fetch_stdout() {
   return 1
 }
 
-# ---- 版本解析：参数指定 > 最新 release ----
+# ---- 版本解析：参数指定 > GitHub API（含镜像）> jsdelivr 数据源（国内可达兜底） ----
 VERSION="${1:-}"
 if [ -z "$VERSION" ]; then
   log "查询最新版本…"
-  VERSION="$(fetch_stdout "https://api.github.com/repos/$REPO/releases/latest" | grep -o '"tag_name": *"[^"]*"' | head -1 | sed 's/.*"v\([^"]*\)"/\1/')"
-  [ -n "$VERSION" ] || die "无法获取最新版本（仓库 $REPO 是否已有 release？网络不通可设置 HONEYGUARD_MIRROR）"
+  VERSION="$(fetch_stdout "https://api.github.com/repos/$REPO/releases/latest" | grep -o '"tag_name": *"[^"]*"' | head -1 | sed 's/.*"v\([^"]*\)"/\1/')" || true
+  if [ -z "$VERSION" ]; then
+    log "GitHub API 不可达，尝试 jsdelivr 数据源…"
+    VERSION="$(curl -fsSL --connect-timeout 10 "https://data.jsdelivr.com/v1/packages/gh/$REPO" \
+      | grep -o '"version":"v[^"]*"' | head -1 | sed 's/"version":"v\([^"]*\)"/\1/')" || true
+  fi
+  [ -n "$VERSION" ] || die "无法获取最新版本（可显式指定：curl ... | bash -s -- v0.2.2）"
 fi
 
 BASE_URL="https://github.com/$REPO/releases/download/v$VERSION/honeyguard-$TARGET"

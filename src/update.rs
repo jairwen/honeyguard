@@ -127,10 +127,41 @@ async fn fetch_latest_version(
             Err(err) => errors.push(format!("{url} → {err}")),
         }
     }
+    // 最后兜底：jsdelivr 数据源（国内可达，按 tag 列版本）
+    if let Ok(tag) = fetch_latest_jsdelivr(client, repo).await {
+        return Ok(tag);
+    }
     bail!(
         "查询最新版本失败（可设置 HONEYGUARD_MIRROR 或 server.update_mirror 指定镜像）：{}",
         errors.join("；")
     );
+}
+
+/// jsdelivr 数据 API：https://data.jsdelivr.com/v1/packages/gh/{repo}
+/// 返回 {"versions":[{"version":"v0.2.2",...},...]}（新版本在前）。
+async fn fetch_latest_jsdelivr(client: &reqwest::Client, repo: &str) -> Result<String> {
+    let url = format!("https://data.jsdelivr.com/v1/packages/gh/{repo}");
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .with_context(|| format!("请求 {url} 失败"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        bail!("jsdelivr 返回 {status}");
+    }
+    let body: serde_json::Value = resp.json().await.context("解析 jsdelivr 响应失败")?;
+    let version = body
+        .get("versions")
+        .and_then(|v| v.get(0))
+        .and_then(|v| v.get("version"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().trim_start_matches('v').to_string())
+        .unwrap_or_default();
+    if version.is_empty() {
+        bail!("jsdelivr 响应无版本信息");
+    }
+    Ok(version)
 }
 
 fn sha256_hex(data: &[u8]) -> String {
