@@ -135,6 +135,7 @@ pub struct DetectorCfg {
     pub process: ProcessCfg,
     pub file_integrity: FileIntegrityCfg,
     pub listen_ports: ListenPortsCfg,
+    pub behavior: BehaviorCfg,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -292,6 +293,36 @@ impl Default for ListenPortsCfg {
         Self {
             enabled: true,
             interval_sec: 60,
+        }
+    }
+}
+
+/// DET-09 行为基线：通过长期观测构建进程通信关系画像，发现异常通信习惯。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct BehaviorCfg {
+    pub enabled: bool,
+    pub interval_sec: u64,
+    /// 每个进程的学习期（秒）：期内只记录其通信对象，不告警。默认 7 天。
+    pub learn_sec: u64,
+    /// 远端 IP 去重数达到该阈值即判为“广泛连接型”（P2P/BT 等），
+    /// 之后陌生 IP 不再告警，改为监控并发激增。
+    pub p2p_ip_threshold: u32,
+    /// 并发外连超过历史峰值 N 倍触发告警（广泛连接型专用）。
+    pub spike_factor: u32,
+    /// 触发并发激增告警的绝对下限（避免小基数误报）。
+    pub spike_min: u32,
+}
+
+impl Default for BehaviorCfg {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            interval_sec: 60,
+            learn_sec: 7 * 86400,
+            p2p_ip_threshold: 50,
+            spike_factor: 4,
+            spike_min: 40,
         }
     }
 }

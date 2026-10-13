@@ -93,6 +93,16 @@
 | DET-06 | 新增监听端口 | /proc/net/tcp{,6}（LISTEN） | P1 |
 | DET-07 | eBPF 实时审计（exec / connect / DNS） | aya (eBPF) | P2 |
 | DET-08 | 入站端口扫描检测 | eBPF / conntrack | P2 |
+| DET-09 | 行为基线（进程通信画像：长期学习通信关系，异常通信/P2P 识别） | /proc/net + /proc/[pid] | P1 |
+
+**DET-09 行为基线 / 进程通信画像（P1）**
+- 通过长期观测构建两层画像（SQLite 持久化）：进程画像（exe 为身份：首次出现时间、历史并发外连峰值、是否广泛连接型）与通信关系（exe, 远端 IP 粒度）。
+- 首次运行为**普查**：存量进程与通信关系静默入档，不产生告警风暴。
+- 每个进程有**学习期**（默认 7 天，可配）：期内只记录不告警；学习期满后连接未见过的远端 IP → `warning`（告警一次后关系转正，不重复打扰）。
+- **新进程**首次出现在出站连接中 → `warning`（新落地的程序在对外通信，进入学习期观测）。
+- **广泛连接型识别**（P2P/BT/种子类）：远端 IP 去重数达到阈值（默认 50，可配）即自动标记——这类进程连海量陌生节点是其本性，陌生 IP 不再告警，改为监控**并发激增**（当前并发 ≥ 历史峰值 N 倍且 ≥ 绝对下限，默认 4 倍/40 条）→ `warning`（识别被滥用做扫描/DDoS）。峰值带迟滞回落，长期静默后不会误报。
+- `honeyguard baseline` 清空行为画像重新学习。
+- 已知局限（后续优化）：进程身份以 exe 路径为准，脚本/解释器类程序（python 跑不同脚本）共享同一身份。
 
 **DET-01 SSH 暴力破解检测（P0）**
 - 数据源自适应：优先 systemd journal（`journalctl -f -o json _COMM=sshd`），无 journald 环境回退 `/var/log/auth.log` tail；两者统一抽象为一个 `LogSource`。
@@ -326,6 +336,9 @@ blocklist_files = []         # 本地恶意 IP 文件路径（每行一个 CIDR�
 interval_sec = 30
 cpu_threshold = 80           # %
 duration_sec = 300
+
+# 完整可运行的最新示例以仓库根目录 config.example.toml 为准
+#（另含 file_integrity / listen_ports / behavior / heartbeat / digest 段）
 
 [whitelist]
 ips = []                     # CIDR，如 ["203.0.113.0/24"]

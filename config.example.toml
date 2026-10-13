@@ -100,6 +100,19 @@ suid_dirs = ["/usr/bin", "/usr/sbin", "/usr/local/bin", "/usr/local/sbin", "/tmp
 enabled = true
 interval_sec = 60
 
+# 行为基线：长期观测构建"进程 ↔ 通信对象"画像。
+# 首轮普查存量进程；每个进程有学习期（期内只记录不告警）；学习期满后连接
+# 未见过的远端 IP 会告警一次；全新进程首次外连会告警。
+# 远端 IP 去重数达到阈值的进程（P2P/BT 类）自动识别为"广泛连接型"：
+# 陌生 IP 不再告警，改为监控并发激增（超历史峰值 N 倍且超绝对下限）
+[detector.behavior]
+enabled = true
+interval_sec = 60
+learn_sec = 604800          # 学习期 7 天
+p2p_ip_threshold = 50       # 判为广泛连接型的远端 IP 去重数阈值
+spike_factor = 4            # 并发达历史峰值 N 倍触发告警
+spike_min = 40              # 并发激增告警的绝对下限
+
 [whitelist]
 # 命中白名单的事件不推送（仅记录本地日志）；M1 生效
 ips = []          # CIDR，如 ["203.0.113.0/24"]

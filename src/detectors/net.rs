@@ -23,8 +23,8 @@ const COMMON_PORTS: &[u16] = &[53, 80, 123, 443];
 /// 长连接判定所需连续出现的扫描周期数。
 const SUSTAINED_CYCLES: u32 = 3;
 /// TCP state 01 = ESTABLISHED；UDP 的“已连接”表项固定为 07。
-const TCP_ESTABLISHED: u8 = 0x01;
-const UDP_CONNECTED: u8 = 0x07;
+pub(crate) const TCP_ESTABLISHED: u8 = 0x01;
+pub(crate) const UDP_CONNECTED: u8 = 0x07;
 /// TCP state 0A = LISTEN（供 listen_ports 检测器复用）。
 pub(crate) const TCP_LISTEN: u8 = 0x0A;
 
@@ -230,6 +230,43 @@ pub(crate) fn find_socket_owner(inode: u64) -> Option<(i32, String, String)> {
         }
     }
     None
+}
+
+/// 单次遍历 /proc 建立 inode → (pid, comm, exe) 映射，供行为基线每轮批量归属。
+pub(crate) fn build_inode_map() -> std::collections::HashMap<u64, (i32, String, String)> {
+    let mut map = std::collections::HashMap::new();
+    let Ok(dir) = std::fs::read_dir("/proc") else {
+        return map;
+    };
+    for entry in dir.flatten() {
+        let name = entry.file_name();
+        let Some(pid) = name.to_str().and_then(|s| s.parse::<i32>().ok()) else {
+            continue;
+        };
+        let fd_dir = entry.path().join("fd");
+        let Ok(fds) = std::fs::read_dir(&fd_dir) else {
+            continue;
+        };
+        let comm = std::fs::read_to_string(format!("/proc/{pid}/comm"))
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
+        let exe = std::fs::read_link(format!("/proc/{pid}/exe"))
+            .map(|p| {
+                p.to_string_lossy()
+                    .trim_end_matches(" (deleted)")
+                    .to_string()
+            })
+            .unwrap_or_default();
+        for fd in fds.flatten() {
+            if let Ok(target) = std::fs::read_link(fd.path())
+                && let Some(rest) = target.to_string_lossy().strip_prefix("socket:[")
+                && let Ok(inode) = rest.trim_end_matches(']').parse::<u64>()
+            {
+                map.insert(inode, (pid, comm.clone(), exe.clone()));
+            }
+        }
+    }
+    map
 }
 
 /// 加载本地黑名单文件（每行一个 IP 或 CIDR，# 注释）；坏行告警跳过，不让检测器挂掉。

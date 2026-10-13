@@ -182,6 +182,18 @@ async fn cmd_run(cli: &Cli) -> Result<()> {
             move |t| detectors::ports::run(ports.clone(), n.clone(), st.clone(), t),
         )));
     }
+    if d.behavior.enabled {
+        let behavior = d.behavior.clone();
+        let (wl, n, st) = (whitelist.clone(), notifier.clone(), store.clone());
+        let token = shutdown_token.clone();
+        detector_tasks.push(tokio::spawn(detectors::supervised(
+            "behavior",
+            token,
+            move |t| {
+                detectors::behavior::run(behavior.clone(), wl.clone(), n.clone(), st.clone(), t)
+            },
+        )));
+    }
     if cfg.alert.heartbeat.enabled || cfg.alert.digest.enabled {
         let (hb, dg) = (cfg.alert.heartbeat, cfg.alert.digest);
         let (n, st) = (notifier.clone(), store.clone());
@@ -216,6 +228,15 @@ fn cmd_baseline(cli: &Cli) -> Result<()> {
     println!("  可登录用户 : {users} 个");
     println!("  SUID 文件  : {suid} 个");
     println!("  监听端口   : {ports} 个");
+    let (procs, pairs) = store.behavior_clear()?;
+    if procs > 0 || pairs > 0 {
+        println!(
+            "  行为画像   : 已清空（{} 个进程 / {} 条关系），重新进入观测学习期",
+            procs, pairs
+        );
+    } else {
+        println!("  行为画像   : 空（将由 behavior 检测器首轮普查建立）");
+    }
     Ok(())
 }
 

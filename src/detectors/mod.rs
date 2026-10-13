@@ -6,6 +6,7 @@
 //! 中止当前实例，保证持有的 [`crate::notify::Notifier`] 克隆全部释放，
 //! 否则告警分发器会因 channel 未关闭而无法退出。
 
+pub mod behavior;
 pub mod fim;
 pub mod net;
 pub mod ports;

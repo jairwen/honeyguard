@@ -20,6 +20,7 @@
 | 告警 outbox 持久化（SQLite，断网重试/重启补发，critical 不丢） | ✅ |
 | DET-05 文件完整性（authorized_keys/shadow/cron/systemd 基线、新增可登录用户、新增 SUID） | ✅ |
 | DET-06 新增监听端口告警（含归属进程） | ✅ |
+| DET-09 行为基线：长期学习进程通信画像，陌生通信对象/新进程外连告警，P2P 类自动识别并转为并发激增监控 | ✅ |
 | 心跳报平安 + 每日摘要 | ✅ |
 | `baseline` 重建基线 / `doctor` 环境自检 | ✅ |
 | eBPF 实时审计（exec / connect / DNS） | M3 |
