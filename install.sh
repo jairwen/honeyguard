@@ -3,7 +3,7 @@
 #
 # 用法：
 #   curl -fsSL https://raw.githubusercontent.com/jairwen/honeyguard/main/install.sh | bash
-#   curl -fsSL ... | bash -s -- v0.1.0          # 安装指定版本
+#   curl -fsSL ... | bash -s -- 0.2.2           # 安装指定版本（v0.2.2 / 0.2.2 均可）
 #   ./install.sh --uninstall                    # 卸载（默认保留配置，--purge 连配置一起删）
 #
 # 环境变量：
@@ -83,7 +83,9 @@ fetch_stdout() {
 }
 
 # ---- 版本解析：参数指定 > GitHub API（含镜像）> jsdelivr 数据源（国内可达兜底） ----
+# 显式版本兼容 v0.2.2 / 0.2.2 两种写法（内部统一为不带 v）
 VERSION="${1:-}"
+VERSION="${VERSION#v}"
 if [ -z "$VERSION" ]; then
   log "查询最新版本…"
   VERSION="$(fetch_stdout "https://api.github.com/repos/$REPO/releases/latest" | grep -o '"tag_name": *"[^"]*"' | head -1 | sed 's/.*"v\([^"]*\)"/\1/')" || true
