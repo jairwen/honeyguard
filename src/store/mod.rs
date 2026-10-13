@@ -436,6 +436,18 @@ impl Store {
             .context("behavior 关系写入失败")
     }
 
+    /// 进程是否已被行为画像跟踪（outbound 长连接规则联动去噪用）。
+    pub fn behavior_proc_known(&self, exe: &str) -> Result<bool> {
+        let conn = self.lock();
+        let mut stmt = conn
+            .prepare("SELECT 1 FROM behavior_procs WHERE exe = ?1 LIMIT 1")
+            .context("behavior 进程查询失败")?;
+        let mut rows = stmt
+            .query_map(params![exe], |_| Ok(()))
+            .context("behavior 进程查询失败")?;
+        Ok(rows.next().is_some())
+    }
+
     /// 进程的远端 IP 去重数（用于 P2P 判定）。
     pub fn behavior_distinct_ips(&self, exe: &str) -> Result<i64> {
         let conn = self.lock();

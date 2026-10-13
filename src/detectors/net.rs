@@ -1,12 +1,15 @@
 //! DET-03 可疑出站连接（PRD §5.1）：周期解析 `/proc/net/tcp{,6}` 与 `udp{,6}`。
 //!
 //! 规则：目的端口命中矿池黑名单或 IP 命中本地黑名单文件 → critical；
-//! 非 53/80/123/443 端口上的 ESTABLISHED 连接持续 ≥ 3 个扫描周期 → warning。
+//! 非 53/80/123/443 端口上的 ESTABLISHED 连接持续 ≥ 3 个扫描周期 → warning
+//! （与 DET-09 行为基线联动去噪：连接可归属且归属进程已被行为画像跟踪——
+//! 含学习期与广泛连接型——时不触发，交由行为基线判定；无法归属进程的连接仍告警）。
 //! 告警正文附带 socket 归属进程（通过 `/proc/[pid]/fd` 的 socket inode 反查，尽力而为）。
 
 use crate::alert::{Alert, Level};
 use crate::config::OutboundCfg;
 use crate::notify::Notifier;
+use crate::store::Store;
 use crate::whitelist::Whitelist;
 use anyhow::Result;
 use ipnet::IpNet;
@@ -97,6 +100,7 @@ pub async fn run(
     cfg: OutboundCfg,
     whitelist: Arc<Whitelist>,
     notifier: Notifier,
+    store: Option<Arc<Store>>,
     token: CancellationToken,
 ) -> Result<()> {
     if !Path::new("/proc/net/tcp").exists() {
@@ -111,6 +115,7 @@ pub async fn run(
         interval_sec = cfg.interval_sec,
         bad_ports = cfg.bad_ports.len(),
         blocklist_nets = blocklist.len(),
+        behavior_linked = store.is_some(),
         "outbound 检测器已启动"
     );
 
@@ -172,7 +177,17 @@ pub async fn run(
             // 长连接判定（非黑名单路径）
             let (cycles, alerted) = sustained.entry(remote).or_insert((0, false));
             *cycles += 1;
-            if *cycles >= SUSTAINED_CYCLES && !*alerted && !COMMON_PORTS.contains(&remote.port()) {
+            // 行为基线联动去噪：连接可归属且归属进程已被行为画像跟踪（含学习期与
+            // 广泛连接型）时，其通信习惯由 DET-09 负责判定，本规则不再打扰；
+            // 无行为基线（无存储）或无法归属进程的连接仍按原规则告警。
+            let behavior_tracked = store.as_ref().is_some_and(|store| {
+                find_socket_owner(entry.inode)
+                    .map(|(_, _, _, exe)| {
+                        !exe.is_empty() && store.behavior_proc_known(&exe).unwrap_or(false)
+                    })
+                    .unwrap_or(false)
+            });
+            if should_alert_sustained(*cycles, *alerted, remote.port(), behavior_tracked) {
                 *alerted = true;
                 let alert = build_alert(
                     Level::Warning,
@@ -188,9 +203,20 @@ pub async fn run(
     }
 }
 
+/// 可疑长连接判定（纯函数，联动行为基线去噪）。
+/// `behavior_tracked`：连接可归属且归属进程已被行为画像跟踪（DET-09 域）。
+pub(crate) fn should_alert_sustained(
+    cycles: u32,
+    alerted: bool,
+    port: u16,
+    behavior_tracked: bool,
+) -> bool {
+    cycles >= SUSTAINED_CYCLES && !alerted && !COMMON_PORTS.contains(&port) && !behavior_tracked
+}
+
 fn build_alert(level: Level, title: &str, reason: &str, entry: &ConnEntry) -> Alert {
     let owner = find_socket_owner(entry.inode)
-        .map(|(pid, comm, cmdline)| format!("进程 {comm} (pid {pid})，命令行：{cmdline}"))
+        .map(|(pid, comm, cmdline, _)| format!("进程 {comm} (pid {pid})，命令行：{cmdline}"))
         .unwrap_or_else(|| "归属进程未知（需要 root 权限或连接已消失）".to_string());
     Alert::new(
         level,
@@ -204,7 +230,8 @@ fn build_alert(level: Level, title: &str, reason: &str, entry: &ConnEntry) -> Al
 }
 
 /// 通过 socket inode 反查归属进程：遍历 /proc/[pid]/fd/* 的 "socket:[inode]" 链接。
-pub(crate) fn find_socket_owner(inode: u64) -> Option<(i32, String, String)> {
+/// 返回 (pid, comm, cmdline, exe)。
+pub(crate) fn find_socket_owner(inode: u64) -> Option<(i32, String, String, String)> {
     let dir = std::fs::read_dir("/proc").ok()?;
     for entry in dir.flatten() {
         let name = entry.file_name();
@@ -225,7 +252,14 @@ pub(crate) fn find_socket_owner(inode: u64) -> Option<(i32, String, String)> {
                 let cmdline = std::fs::read_to_string(format!("/proc/{pid}/cmdline"))
                     .map(|s| s.trim_matches('\0').replace('\0', " "))
                     .unwrap_or_default();
-                return Some((pid, comm, cmdline));
+                let exe = std::fs::read_link(format!("/proc/{pid}/exe"))
+                    .map(|p| {
+                        p.to_string_lossy()
+                            .trim_end_matches(" (deleted)")
+                            .to_string()
+                    })
+                    .unwrap_or_default();
+                return Some((pid, comm, cmdline, exe));
             }
         }
     }
@@ -357,5 +391,25 @@ mod tests {
     fn common_port_set_excludes_miner_ports() {
         assert!(COMMON_PORTS.contains(&443));
         assert!(!COMMON_PORTS.contains(&3333));
+    }
+
+    #[test]
+    fn sustained_rule_suppressed_by_behavior_baseline() {
+        // 无行为基线（未跟踪）：达到周期即告警
+        assert!(should_alert_sustained(SUSTAINED_CYCLES, false, 8080, false));
+        assert!(
+            !should_alert_sustained(SUSTAINED_CYCLES - 1, false, 8080, false),
+            "未达周期"
+        );
+        assert!(
+            !should_alert_sustained(SUSTAINED_CYCLES, true, 8080, false),
+            "已告警过"
+        );
+        assert!(
+            !should_alert_sustained(SUSTAINED_CYCLES, false, 443, false),
+            "通用端口"
+        );
+        // 行为基线已跟踪该进程（学习期/已知关系/广泛连接型）：去噪，不再告警
+        assert!(!should_alert_sustained(SUSTAINED_CYCLES, false, 8080, true));
     }
 }

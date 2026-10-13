@@ -74,7 +74,7 @@ pub async fn scan(notifier: &Notifier, store: &Store) -> Result<usize> {
         }
         store.listen_put(ip, *port)?; // 立即入基线，避免下轮重复告警
         let owner = super::net::find_socket_owner(*inode)
-            .map(|(pid, comm, cmdline)| format!("进程 {comm} (pid {pid})，命令行：{cmdline}"))
+            .map(|(pid, comm, cmdline, _)| format!("进程 {comm} (pid {pid})，命令行：{cmdline}"))
             .unwrap_or_else(|| "归属进程未知".to_string());
         let alert = Alert::new(
             Level::Warning,

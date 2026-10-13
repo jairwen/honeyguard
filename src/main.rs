@@ -144,12 +144,12 @@ async fn cmd_run(cli: &Cli) -> Result<()> {
     }
     if d.outbound.enabled {
         let outbound = d.outbound.clone();
-        let (wl, n) = (whitelist.clone(), notifier.clone());
+        let (wl, n, st) = (whitelist.clone(), notifier.clone(), store.clone());
         let token = shutdown_token.clone();
         detector_tasks.push(tokio::spawn(detectors::supervised(
             "outbound",
             token,
-            move |t| detectors::net::run(outbound.clone(), wl.clone(), n.clone(), t),
+            move |t| detectors::net::run(outbound.clone(), wl.clone(), n.clone(), st.clone(), t),
         )));
     }
     if d.process.enabled {
