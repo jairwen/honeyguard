@@ -160,8 +160,10 @@ DynamicUser=no
 WantedBy=multi-user.target
 EOF
   systemctl daemon-reload
-  systemctl enable --now "$SERVICE"
-  log "systemd 服务已启用并启动: $SERVICE"
+  # --now 对已运行的服务不会重启，升级时会一直跑旧二进制；改为显式 restart
+  systemctl enable "$SERVICE"
+  systemctl restart "$SERVICE"
+  log "systemd 服务已启用并重启: $SERVICE"
   sleep 1
   systemctl is-active --quiet "$SERVICE" && log "服务运行中 ✓" || warn "服务未处于 active 状态，请检查: journalctl -u $SERVICE -n 50"
 else
