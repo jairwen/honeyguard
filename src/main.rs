@@ -1,11 +1,13 @@
 use anyhow::{Context, Result, bail};
 use clap::{ArgAction, Parser, Subcommand};
 use honeyguard::alert::{self, Alert, Level};
+use honeyguard::ban;
 use honeyguard::config::{self, Config};
 use honeyguard::detectors;
 use honeyguard::logging;
 use honeyguard::notify::{Delivery, Notifier, webhook};
 use honeyguard::whitelist::Whitelist;
+use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -47,6 +49,23 @@ enum Command {
     },
     /// 环境自检：配置、权限、日志源、状态库、Webhook 连通性
     Doctor,
+    /// 列出封禁记录（状态库 + 防火墙实际规则对账）
+    Bans,
+    /// 手动封禁 IP（永久；写入防火墙与状态库，用于人工处置或链路验证）
+    Ban {
+        ip: IpAddr,
+        /// 允许封禁内网/私网地址（默认拒绝，防误封网关/跳板机）
+        #[arg(long)]
+        allow_private: bool,
+    },
+    /// 手动解封 IP（删除防火墙规则与状态库记录；封禁误伤时的应急通道）
+    Unban {
+        /// 要解封的 IP（可多个）
+        ips: Vec<IpAddr>,
+        /// 解封全部
+        #[arg(long)]
+        all: bool,
+    },
     /// 自更新到最新 Release（下载、sha256 校验、原子替换并重启服务）
     Update {
         /// 只检查是否有新版本，不执行更新
@@ -67,6 +86,9 @@ async fn main() -> Result<()> {
         Command::TestAlert => cmd_test_alert(&cli).await,
         Command::Baseline { .. } => cmd_baseline(&cli),
         Command::Doctor => cmd_doctor(&cli).await,
+        Command::Bans => cmd_bans().await,
+        Command::Ban { ip, allow_private } => cmd_ban(ip, allow_private).await,
+        Command::Unban { ips, all } => cmd_unban(ips, all).await,
         Command::Update { check } => {
             // update 不依赖完整配置可用：镜像设置尽力读取，配置坏了也能升级
             let mirror = load_config(&cli.config)
@@ -140,6 +162,27 @@ async fn cmd_run(cli: &Cli) -> Result<()> {
         let (brute, login) = (d.ssh_bruteforce.clone(), d.ssh_login.clone());
         let (wl, n, st) = (whitelist.clone(), notifier.clone(), store.clone());
         let token = shutdown_token.clone();
+        let firewall: Option<Arc<dyn ban::Firewall>> = if brute.ban.enabled {
+            match ban::detect().await {
+                Ok(fw) => {
+                    tracing::info!(
+                        backend = fw.name(),
+                        duration = brute.ban.duration_sec,
+                        "自动封禁已就绪（达到 ssh_bruteforce 阈值即封禁来源 IP）"
+                    );
+                    Some(Arc::from(fw))
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        "自动封禁不可用：达到阈值仅告警不封禁（doctor 可诊断）"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
         detector_tasks.push(tokio::spawn(detectors::supervised(
             "ssh",
             token,
@@ -150,6 +193,7 @@ async fn cmd_run(cli: &Cli) -> Result<()> {
                     wl.clone(),
                     n.clone(),
                     st.clone(),
+                    firewall.clone(),
                     t,
                 )
             },
@@ -307,6 +351,13 @@ async fn cmd_doctor(cli: &Cli) -> Result<()> {
                     "不可用（SSH 检测器不工作）".into()
                 },
             );
+            // 3.5 自动封禁后端（仅在配置开启 ban 时检查）
+            if cfg.detector.ssh_bruteforce.enabled && cfg.detector.ssh_bruteforce.ban.enabled {
+                match ban::detect().await {
+                    Ok(fw) => check("封禁后端", true, fw.name().into()),
+                    Err(err) => check("封禁后端", false, format!("{err:#}")),
+                }
+            }
             // 4. /proc
             let proc_ok = std::path::Path::new("/proc/net/tcp").exists();
             check(
@@ -356,6 +407,99 @@ async fn cmd_doctor(cli: &Cli) -> Result<()> {
     } else {
         bail!("存在未通过的检查项，详见上方输出");
     }
+}
+
+/// `honeyguard bans`：状态库记录 + 防火墙实际规则对账。
+async fn cmd_bans() -> Result<()> {
+    let store =
+        honeyguard::store::Store::open_default().context("状态数据库不可用（以 root 运行？）")?;
+    let rows = store.ban_load().context("读取封禁记录失败")?;
+    let fw_rules = match ban::detect().await {
+        Ok(fw) => fw.list().await.unwrap_or_default(),
+        Err(_) => Vec::new(),
+    };
+    if rows.is_empty() && fw_rules.is_empty() {
+        println!("当前没有封禁记录。");
+        return Ok(());
+    }
+    let now = chrono::Utc::now().timestamp();
+    println!("{:<42} {:<17} 剩余", "IP", "封禁时间(本地)");
+    for (ip, banned_at, duration_sec) in &rows {
+        let time = chrono::DateTime::from_timestamp(*banned_at, 0)
+            .map(|t| {
+                t.with_timezone(&chrono::Local)
+                    .format("%Y-%m-%d %H:%M")
+                    .to_string()
+            })
+            .unwrap_or_else(|| "-".into());
+        let remaining = if *duration_sec == 0 {
+            "永久".to_string()
+        } else {
+            let left = (banned_at + duration_sec - now).max(0);
+            format!("{} 分钟", (left + 59) / 60)
+        };
+        let on_fw = if fw_rules.contains(ip) {
+            ""
+        } else {
+            "  [防火墙无规则]"
+        };
+        println!("{ip:<42} {time:<17} {remaining}{on_fw}");
+    }
+    // 防火墙有规则但状态库无记录（如手工往 HONEYGUARD 链加的规则）
+    for ip in &fw_rules {
+        if !rows.iter().any(|(banned, _, _)| banned == ip) {
+            println!("{ip:<42} {:<17} [状态库无记录，重启后不会恢复]", "-");
+        }
+    }
+    Ok(())
+}
+
+/// `honeyguard ban <IP>`：手动永久封禁（安全规则同自动封禁）。
+async fn cmd_ban(ip: IpAddr, allow_private: bool) -> Result<()> {
+    if let Some(reason) = ban::ban_refusal(ip, allow_private) {
+        bail!("拒绝封禁：{ip} 是{reason}");
+    }
+    let fw = ban::detect().await?;
+    let store =
+        honeyguard::store::Store::open_default().context("状态数据库不可用（以 root 运行？）")?;
+    fw.ban(ip).await?;
+    store.ban_put(&ip, chrono::Utc::now().timestamp(), 0)?;
+    println!("已封禁 {ip}（永久）。解封命令：honeyguard unban {ip}");
+    Ok(())
+}
+
+/// `honeyguard unban <IP>... / --all`：删除防火墙规则与状态库记录。
+async fn cmd_unban(ips: Vec<IpAddr>, all: bool) -> Result<()> {
+    if ips.is_empty() && !all {
+        bail!("请指定要解封的 IP，或使用 --all 解封全部");
+    }
+    let store =
+        honeyguard::store::Store::open_default().context("状态数据库不可用（以 root 运行？）")?;
+    let mut targets = ips;
+    if all {
+        targets = store.ban_load()?.into_iter().map(|(ip, _, _)| ip).collect();
+        if targets.is_empty() {
+            println!("没有封禁记录。");
+            return Ok(());
+        }
+    }
+    let firewall = ban::detect().await.ok();
+    if firewall.is_none() {
+        println!("警告：防火墙后端不可用，只清除状态库记录；规则若仍在需以 root 执行。");
+    }
+    for ip in &targets {
+        let fw_note = match firewall.as_ref() {
+            Some(fw) => match fw.unban(*ip).await {
+                Ok(true) => "已删防火墙规则".to_string(),
+                Ok(false) => "防火墙本无规则".to_string(),
+                Err(e) => format!("防火墙解封失败：{e:#}"),
+            },
+            None => "未处理".to_string(),
+        };
+        store.ban_delete(ip)?;
+        println!("已解封 {ip}（{fw_note}）");
+    }
+    Ok(())
 }
 
 fn nix_uid() -> u32 {
@@ -421,8 +565,20 @@ fn cmd_once(cli: &Cli) -> Result<()> {
     );
     println!("检测器：");
     println!(
-        "  ssh_bruteforce  : enabled={} window={}s max_failures={}",
-        d.ssh_bruteforce.enabled, d.ssh_bruteforce.window_sec, d.ssh_bruteforce.max_failures
+        "  ssh_bruteforce  : enabled={} window={}s max_failures={} ban={} ban_duration={}",
+        d.ssh_bruteforce.enabled,
+        d.ssh_bruteforce.window_sec,
+        d.ssh_bruteforce.max_failures,
+        if d.ssh_bruteforce.ban.enabled {
+            "on"
+        } else {
+            "off"
+        },
+        if d.ssh_bruteforce.ban.duration_sec == 0 {
+            "永久".to_string()
+        } else {
+            format!("{}s", d.ssh_bruteforce.ban.duration_sec)
+        }
     );
     println!(
         "  ssh_login       : enabled={} mode={:?}",

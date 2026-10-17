@@ -160,8 +160,10 @@ pub struct SshBruteforceCfg {
     pub enabled: bool,
     /// 统计时间窗口（秒）。
     pub window_sec: u64,
-    /// 窗口内同一来源 IP 认证失败阈值。
+    /// 窗口内同一来源 IP 认证失败阈值（达到即告警；开启 ban 时同时触发封禁）。
     pub max_failures: u32,
+    /// 达到阈值后的自动封禁动作。
+    pub ban: BanCfg,
 }
 
 impl Default for SshBruteforceCfg {
@@ -170,6 +172,31 @@ impl Default for SshBruteforceCfg {
             enabled: true,
             window_sec: 600,
             max_failures: 20,
+            ban: BanCfg::default(),
+        }
+    }
+}
+
+/// 自动封禁（响应层）：达到 ssh_bruteforce 阈值后把来源 IP 写入防火墙
+/// （iptables/nftables 自动检测，规则放专用链/表）。
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct BanCfg {
+    /// 是否启用自动封禁。默认关闭：封禁会改动机器防火墙，属敏感操作需显式开启。
+    pub enabled: bool,
+    /// 封禁时长（秒），到期自动解封；0 = 永久。
+    pub duration_sec: u64,
+    /// 是否允许封禁内网/私网地址（10/8、172.16/12、192.168/16、IPv6 ULA）。
+    /// 默认拒绝，防止误封网关/跳板机把自己锁在门外。
+    pub allow_private: bool,
+}
+
+impl Default for BanCfg {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            duration_sec: 3600,
+            allow_private: false,
         }
     }
 }
@@ -387,6 +414,9 @@ impl Config {
             if wh.provider != Provider::Dingtalk && wh.secret.is_some() {
                 tracing::warn!(provider = %wh.provider, "secret 仅对 provider = dingtalk 生效，已忽略");
             }
+        }
+        if self.detector.ssh_bruteforce.ban.enabled && !self.detector.ssh_bruteforce.enabled {
+            tracing::warn!("ssh_bruteforce 未启用，ban 封禁配置不会生效");
         }
         Ok(())
     }

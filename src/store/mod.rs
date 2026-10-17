@@ -12,6 +12,7 @@ use anyhow::{Context, Result};
 use rusqlite::{Connection, params};
 use std::net::IpAddr;
 use std::path::Path;
+use std::str::FromStr;
 use std::sync::Mutex;
 
 pub const DEFAULT_DB_PATH: &str = "/var/lib/honeyguard/state.db";
@@ -103,7 +104,12 @@ impl Store {
                  last_port  INTEGER NOT NULL DEFAULT 0,
                  PRIMARY KEY (exe, ip)
              );
-             CREATE INDEX IF NOT EXISTS idx_behavior_pairs_exe ON behavior_pairs(exe);",
+             CREATE INDEX IF NOT EXISTS idx_behavior_pairs_exe ON behavior_pairs(exe);
+             CREATE TABLE IF NOT EXISTS bans (
+                 ip           TEXT PRIMARY KEY,
+                 banned_at    INTEGER NOT NULL,   -- unix 秒
+                 duration_sec INTEGER NOT NULL    -- 0 = 永久
+             );",
         )
         .context("初始化状态数据库表失败")?;
         Ok(Self {
@@ -476,6 +482,53 @@ impl Store {
             .context("behavior 清空失败")?;
         Ok((procs, pairs))
     }
+
+    // ---- 自动封禁（响应层） ----
+
+    /// 记录封禁（同一 IP 重复封禁时刷新 banned_at 与时长）。
+    pub fn ban_put(&self, ip: &IpAddr, banned_at: i64, duration_sec: i64) -> Result<()> {
+        self.lock()
+            .execute(
+                "INSERT OR REPLACE INTO bans(ip, banned_at, duration_sec) VALUES (?1, ?2, ?3)",
+                params![ip.to_string(), banned_at, duration_sec],
+            )
+            .map(|_| ())
+            .context("封禁记录写入失败")
+    }
+
+    pub fn ban_delete(&self, ip: &IpAddr) -> Result<()> {
+        self.lock()
+            .execute("DELETE FROM bans WHERE ip = ?1", params![ip.to_string()])
+            .map(|_| ())
+            .context("封禁记录删除失败")
+    }
+
+    /// 全部封禁记录：(ip, banned_at, duration_sec)。
+    pub fn ban_load(&self) -> Result<Vec<(IpAddr, i64, i64)>> {
+        let conn = self.lock();
+        let mut stmt = conn
+            .prepare("SELECT ip, banned_at, duration_sec FROM bans")
+            .context("封禁记录查询失败")?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    IpAddr::from_str(&row.get::<_, String>(0)?),
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })
+            .context("封禁记录查询失败")?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .context("封禁记录读取失败")?;
+        // 历史数据损坏（非 IP 字符串）跳过而不是整个功能不可用
+        Ok(rows
+            .into_iter()
+            .filter_map(|(ip, at, dur)| {
+                let ip: Result<IpAddr, std::net::AddrParseError> = ip;
+                ip.ok().map(|ip| (ip, at, dur))
+            })
+            .collect())
+    }
 }
 
 /// 进程通信画像（DET-09）。
@@ -583,5 +636,31 @@ mod tests {
         assert_eq!(store.outbox_pending_count().unwrap(), 1, "重启后积压应恢复");
         let due = store.outbox_due(10, 10).unwrap();
         assert_eq!(due[0].body, "body");
+    }
+
+    #[test]
+    fn ban_roundtrip() {
+        let store = mem();
+        let a = IpAddr::from_str("203.0.113.7").unwrap();
+        let b = IpAddr::from_str("2001:db8::1").unwrap();
+        store.ban_put(&a, 1000, 3600).unwrap();
+        store.ban_put(&b, 1000, 0).unwrap();
+        // 重复封禁刷新时间
+        store.ban_put(&a, 2000, 60).unwrap();
+
+        let mut rows = store.ban_load().unwrap();
+        rows.sort_by_key(|(ip, _, _)| ip.to_string());
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].0, b);
+        assert_eq!(rows[0].2, 0);
+        assert_eq!(rows[1].0, a);
+        assert_eq!(rows[1], (a, 2000, 60));
+
+        store.ban_delete(&a).unwrap();
+        let rows = store.ban_load().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, b);
+        // 删除不存在的记录不报错
+        store.ban_delete(&a).unwrap();
     }
 }

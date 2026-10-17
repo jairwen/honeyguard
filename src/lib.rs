@@ -8,6 +8,7 @@
 //! - `collectors` / `detectors` / `store`：M1/M2 落地。
 
 pub mod alert;
+pub mod ban;
 pub mod collectors;
 pub mod config;
 pub mod detectors;

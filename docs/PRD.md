@@ -324,7 +324,12 @@ secret = ""                  # 钉钉加签用，可空
 [detector.ssh_bruteforce]
 enabled = true
 window_sec = 600
-max_failures = 20
+max_failures = 20            # 窗口内同 IP 失败阈值；开启 ban 后同阈值触发封禁
+
+[detector.ssh_bruteforce.ban]
+enabled = false              # 达到阈值自动封禁来源 IP（iptables/nftables）
+duration_sec = 3600          # 封禁时长，到期自动解封；0 = 永久
+allow_private = false        # 内网地址默认拒绝封禁（防误封网关/跳板机）
 
 [detector.ssh_login]
 mode = "all"                 # all | new_ip | off

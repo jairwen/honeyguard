@@ -65,9 +65,23 @@ template = '{"text": "[{{level}}] {{title}} @{{host}}\n{{body}}"}'
 
 [detector.ssh_bruteforce]
 enabled = true
-# 时间窗口内同一来源 IP 认证失败达到阈值 → critical
+# 时间窗口内同一来源 IP 认证失败达到阈值 → critical 告警
+# （下方 [ban] 开启后，达到同一阈值还会自动封禁该 IP）
 window_sec = 600
 max_failures = 20
+
+# 自动封禁：达到上面阈值后把来源 IP 写入防火墙（iptables/nftables 自动检测，
+# 规则放 HONEYGUARD 专用链/honeyguard 专用表，不污染已有配置）。
+# 封禁记录持久化，机器重启后自动恢复未到期封禁，到期自动解封。
+# 注意：默认关闭；开启前建议把自己的常用 IP 加入 [whitelist] ips，
+# 防止自己输错密码次数过多被锁在门外（解封：honeyguard unban <IP>）
+[detector.ssh_bruteforce.ban]
+enabled = false
+# 封禁时长（秒），到期自动解封；0 = 永久
+duration_sec = 3600
+# 是否允许封禁内网地址（10.x/172.16-31.x/192.168.x/IPv6 ULA）。
+# 默认拒绝，防止误封网关/跳板机
+allow_private = false
 
 [detector.ssh_login]
 enabled = true
