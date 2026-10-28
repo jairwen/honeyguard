@@ -1,3 +1,5 @@
 /target
 config.toml
+# 本地真实配置（含 webhook 凭据），绝不入库
+config.sample.toml
 .DS_Store
