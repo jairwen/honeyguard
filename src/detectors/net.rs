@@ -3,7 +3,8 @@
 //! 规则：目的端口命中矿池黑名单或 IP 命中本地黑名单文件 → critical；
 //! 非 53/80/123/443 端口上的 ESTABLISHED 连接持续 ≥ 3 个扫描周期 → warning
 //! （与 DET-09 行为基线联动去噪：连接可归属且归属进程已被行为画像跟踪——
-//! 含学习期与广泛连接型——时不触发，交由行为基线判定；无法归属进程的连接仍告警）。
+//! 含学习期与广泛连接型——时不触发，交由行为基线判定；无法归属进程的连接仍告警；
+//! honeyguard 自身的 socket 同样不触发该启发规则，见 [`SelfIdentity`]）。
 //! 对端为回环地址的连接是本机 IPC（应用 ↔ mongod/redis 等），不属于出站，整体不在范围。
 //! 告警正文附带 socket 归属进程（通过 `/proc/[pid]/fd` 的 socket inode 反查，尽力而为）。
 
@@ -119,6 +120,7 @@ pub async fn run(
     }
     let blocklist = load_blocklists(&cfg.blocklist_files);
     let interval = Duration::from_secs(cfg.interval_sec.max(1));
+    let me = SelfIdentity::current();
     // remote → 连续出现周期数 + 是否已告警（断开后重连可再次告警）
     let mut sustained: HashMap<SocketAddr, (u32, bool)> = HashMap::new();
     tracing::info!(
@@ -189,15 +191,17 @@ pub async fn run(
             *cycles += 1;
             // 行为基线联动去噪：连接可归属且归属进程已被行为画像跟踪（含学习期与
             // 广泛连接型）时，其通信习惯由 DET-09 负责判定，本规则不再打扰；
+            // honeyguard 自身的 socket 不入画像（见 SelfIdentity），在此直接免除。
             // 无行为基线（无存储）或无法归属进程的连接仍按原规则告警。
-            let behavior_tracked = store.as_ref().is_some_and(|store| {
+            let exempt = store.as_ref().is_some_and(|store| {
                 find_socket_owner(entry.inode)
-                    .map(|(_, _, _, exe)| {
-                        !exe.is_empty() && store.behavior_proc_known(&exe).unwrap_or(false)
+                    .map(|(pid, _, _, exe)| {
+                        me.matches(pid, &exe)
+                            || (!exe.is_empty() && store.behavior_proc_known(&exe).unwrap_or(false))
                     })
                     .unwrap_or(false)
             });
-            if should_alert_sustained(*cycles, *alerted, remote.port(), behavior_tracked) {
+            if should_alert_sustained(*cycles, *alerted, remote.port(), exempt) {
                 *alerted = true;
                 let alert = build_alert(
                     Level::Warning,
@@ -214,14 +218,9 @@ pub async fn run(
 }
 
 /// 可疑长连接判定（纯函数，联动行为基线去噪）。
-/// `behavior_tracked`：连接可归属且归属进程已被行为画像跟踪（DET-09 域）。
-pub(crate) fn should_alert_sustained(
-    cycles: u32,
-    alerted: bool,
-    port: u16,
-    behavior_tracked: bool,
-) -> bool {
-    cycles >= SUSTAINED_CYCLES && !alerted && !COMMON_PORTS.contains(&port) && !behavior_tracked
+/// `exempt`：连接归属进程不受本启发规则约束——已被行为画像跟踪（DET-09 域）或为 honeyguard 自身。
+pub(crate) fn should_alert_sustained(cycles: u32, alerted: bool, port: u16, exempt: bool) -> bool {
+    cycles >= SUSTAINED_CYCLES && !alerted && !COMMON_PORTS.contains(&port) && !exempt
 }
 
 fn build_alert(level: Level, title: &str, reason: &str, entry: &ConnEntry) -> Alert {
@@ -237,6 +236,46 @@ fn build_alert(level: Level, title: &str, reason: &str, entry: &ConnEntry) -> Al
             entry.local, entry.remote, entry.uid, entry.inode
         ),
     )
+}
+
+/// `/proc/[pid]/exe` 的身份形态：二进制在运行中被替换/删除后 readlink 带 " (deleted)" 后缀，
+/// 去掉以保持进程身份稳定（升级后未重启的服务不应变成“另一个进程”）。
+pub(crate) fn exe_path_string(path: &Path) -> String {
+    path.to_string_lossy()
+        .trim_end_matches(" (deleted)")
+        .to_string()
+}
+
+/// honeyguard 自身身份，供检测器把自己的 socket 排除在**行为类启发规则**之外。
+///
+/// 自身出站（出口 IP 探测、告警 webhook、版本检查/升级下载）对端多为 CDN，IP 轮换是常态，
+/// 不存在可学习的“通信习惯”，纳入画像只会在学习期满后持续误报“通信对象异常”。
+/// 同一二进制的 CLI 调用（`sudo honeyguard update`）pid 不同但 exe 相同，故以 exe 为主、
+/// 守护进程 pid 兜底。黑名单类规则（矿池端口 / 恶意 IP）不走此免除。
+pub(crate) struct SelfIdentity {
+    pid: i32,
+    exe: Option<String>,
+}
+
+impl SelfIdentity {
+    pub(crate) fn current() -> Self {
+        Self::new(
+            std::process::id() as i32,
+            std::env::current_exe().ok().as_deref(),
+        )
+    }
+
+    fn new(pid: i32, exe: Option<&Path>) -> Self {
+        Self {
+            pid,
+            exe: exe.map(exe_path_string),
+        }
+    }
+
+    /// `exe` 为空表示归属不明，永不视为自身。
+    pub(crate) fn matches(&self, pid: i32, exe: &str) -> bool {
+        pid == self.pid || (!exe.is_empty() && self.exe.as_deref() == Some(exe))
+    }
 }
 
 /// 通过 socket inode 反查归属进程：遍历 /proc/[pid]/fd/* 的 "socket:[inode]" 链接。
@@ -263,11 +302,7 @@ pub(crate) fn find_socket_owner(inode: u64) -> Option<(i32, String, String, Stri
                     .map(|s| s.trim_matches('\0').replace('\0', " "))
                     .unwrap_or_default();
                 let exe = std::fs::read_link(format!("/proc/{pid}/exe"))
-                    .map(|p| {
-                        p.to_string_lossy()
-                            .trim_end_matches(" (deleted)")
-                            .to_string()
-                    })
+                    .map(|p| exe_path_string(&p))
                     .unwrap_or_default();
                 return Some((pid, comm, cmdline, exe));
             }
@@ -295,11 +330,7 @@ pub(crate) fn build_inode_map() -> std::collections::HashMap<u64, (i32, String, 
             .map(|s| s.trim().to_string())
             .unwrap_or_default();
         let exe = std::fs::read_link(format!("/proc/{pid}/exe"))
-            .map(|p| {
-                p.to_string_lossy()
-                    .trim_end_matches(" (deleted)")
-                    .to_string()
-            })
+            .map(|p| exe_path_string(&p))
             .unwrap_or_default();
         for fd in fds.flatten() {
             if let Ok(target) = std::fs::read_link(fd.path())
@@ -465,7 +496,43 @@ mod tests {
             !should_alert_sustained(SUSTAINED_CYCLES, false, 443, false),
             "通用端口"
         );
-        // 行为基线已跟踪该进程（学习期/已知关系/广泛连接型）：去噪，不再告警
+        // 行为基线已跟踪该进程（学习期/已知关系/广泛连接型）或为 honeyguard 自身：去噪，不再告警
         assert!(!should_alert_sustained(SUSTAINED_CYCLES, false, 8080, true));
+    }
+
+    #[test]
+    fn self_identity_matches_daemon_pid_or_same_binary() {
+        // 升级后未重启：/proc/self/exe 带 " (deleted)"，归一化后仍是同一身份
+        let me = SelfIdentity::new(4242, Some(Path::new("/usr/local/bin/honeyguard (deleted)")));
+        assert!(me.matches(4242, "/anything"), "守护进程 pid 命中即自身");
+        assert!(
+            me.matches(1, "/usr/local/bin/honeyguard"),
+            "同一二进制的 CLI 调用（honeyguard update）按 exe 命中"
+        );
+        assert!(!me.matches(1, "/usr/bin/curl"));
+        assert!(!me.matches(1, ""), "归属不明的空 exe 不应误判为自身");
+
+        // current_exe 不可得时只剩 pid 兜底
+        let pid_only = SelfIdentity::new(4242, None);
+        assert!(pid_only.matches(4242, "/usr/local/bin/honeyguard"));
+        assert!(!pid_only.matches(1, "/usr/local/bin/honeyguard"));
+
+        // 真实进程：自身 pid 必然命中
+        let real = SelfIdentity::current();
+        assert!(real.matches(std::process::id() as i32, ""));
+    }
+
+    #[test]
+    fn exe_path_string_strips_deleted_suffix_only() {
+        assert_eq!(
+            exe_path_string(Path::new("/usr/local/bin/honeyguard (deleted)")),
+            "/usr/local/bin/honeyguard"
+        );
+        assert_eq!(exe_path_string(Path::new("/usr/bin/curl")), "/usr/bin/curl");
+        assert_eq!(
+            exe_path_string(Path::new("/opt/app (deleted)/bin")),
+            "/opt/app (deleted)/bin",
+            "只去尾部后缀，路径中间的同名片段保留"
+        );
     }
 }

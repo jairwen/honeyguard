@@ -12,14 +12,17 @@
 //! - **全新进程**首次出现在外连中 → warning（新落地的程序在对外通信）；
 //! - **广泛连接型**（远端 IP 去重数 ≥ 阈值，如 P2P/种子/BT 客户端）：
 //!   陌生 IP 不再告警（其本性就是连海量节点），改为监控**并发激增**
-//!   （当前并发 ≥ 峰值 N 倍且 ≥ 绝对下限）→ warning（疑似被用于扫描/DDoS）。
+//!   （当前并发 ≥ 峰值 N 倍且 ≥ 绝对下限）→ warning（疑似被用于扫描/DDoS）；
+//! - **honeyguard 自身**（守护进程及同一二进制的 CLI 调用）不入画像、不告警：
+//!   其出站对端多为 CDN、IP 轮换是常态，不存在可学习的通信习惯，见 [`SelfIdentity`]。
 //!
 //! `honeyguard baseline` 清空行为基线重新学习。
 
 use crate::alert::{Alert, Level};
 use crate::config::BehaviorCfg;
 use crate::detectors::net::{
-    TCP_ESTABLISHED, UDP_CONNECTED, build_inode_map, is_outbound_candidate, parse_proc_net,
+    SelfIdentity, TCP_ESTABLISHED, UDP_CONNECTED, build_inode_map, is_outbound_candidate,
+    parse_proc_net,
 };
 use crate::notify::Notifier;
 use crate::store::{BehaviorProc, Store};
@@ -48,6 +51,7 @@ pub async fn run(
         return Ok(());
     };
     let interval = Duration::from_secs(cfg.interval_sec.max(1));
+    let me = SelfIdentity::current();
     tracing::info!(
         interval_sec = cfg.interval_sec,
         learn_days = cfg.learn_sec / 86400,
@@ -62,7 +66,7 @@ pub async fn run(
                 return Ok(());
             }
         }
-        let inputs = collect();
+        let inputs = collect(&me);
         let now = chrono::Utc::now().timestamp();
         if let Err(err) = process_scan(&inputs, &cfg, &whitelist, &notifier, &store, now).await {
             tracing::warn!(error = %err, "behavior 扫描出错");
@@ -245,8 +249,8 @@ pub async fn process_scan(
     Ok(alerts)
 }
 
-/// 从 /proc 采集当前出站连接并按进程聚合（TCP ESTABLISHED + UDP 已连接，排除回环）。
-fn collect() -> Vec<ScanInput> {
+/// 从 /proc 采集当前出站连接并按进程聚合（TCP ESTABLISHED + UDP 已连接，排除回环与自身）。
+fn collect(me: &SelfIdentity) -> Vec<ScanInput> {
     let inode_map = build_inode_map();
     let mut by_exe: HashMap<String, ScanInput> = HashMap::new();
     for (file, ipv6, tcp) in [
@@ -263,10 +267,10 @@ fn collect() -> Vec<ScanInput> {
             if !is_outbound_candidate(&entry, wanted) {
                 continue;
             }
-            let Some((_, comm, exe)) = inode_map.get(&entry.inode) else {
+            let Some((pid, comm, exe)) = inode_map.get(&entry.inode) else {
                 continue; // 归属不明的连接交给 outbound 检测器
             };
-            if exe.is_empty() {
+            if exe.is_empty() || me.matches(*pid, exe) {
                 continue;
             }
             let input = by_exe.entry(exe.clone()).or_insert_with(|| ScanInput {
