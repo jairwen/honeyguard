@@ -4,6 +4,7 @@
 //! 非 53/80/123/443 端口上的 ESTABLISHED 连接持续 ≥ 3 个扫描周期 → warning
 //! （与 DET-09 行为基线联动去噪：连接可归属且归属进程已被行为画像跟踪——
 //! 含学习期与广泛连接型——时不触发，交由行为基线判定；无法归属进程的连接仍告警）。
+//! 对端为回环地址的连接是本机 IPC（应用 ↔ mongod/redis 等），不属于出站，整体不在范围。
 //! 告警正文附带 socket 归属进程（通过 `/proc/[pid]/fd` 的 socket inode 反查，尽力而为）。
 
 use crate::alert::{Alert, Level};
@@ -96,6 +97,15 @@ fn parse_addr_port(s: &str, ipv6: bool) -> Option<SocketAddr> {
     Some(SocketAddr::new(ip, port))
 }
 
+/// 出站监测范围（outbound 与行为基线共用口径）：已建立（TCP）/已连接（UDP）、
+/// 对端端口非 0、且对端非回环。对端为回环即本机内部连接，不属于出站；
+/// tcp6 中 IPv4 映射形态（::ffff:127.0.0.1）`is_loopback` 不识别，须先 `to_canonical` 归一。
+pub(crate) fn is_outbound_candidate(entry: &ConnEntry, wanted_state: u8) -> bool {
+    entry.state == wanted_state
+        && entry.remote.port() != 0
+        && !entry.remote.ip().to_canonical().is_loopback()
+}
+
 pub async fn run(
     cfg: OutboundCfg,
     whitelist: Arc<Whitelist>,
@@ -139,7 +149,7 @@ pub async fn run(
                 entries.extend(
                     parse_proc_net(&data, ipv6)
                         .into_iter()
-                        .filter(|e| e.state == wanted && e.remote.port() != 0),
+                        .filter(|e| is_outbound_candidate(e, wanted)),
                 );
             }
         }
@@ -391,6 +401,52 @@ mod tests {
     fn common_port_set_excludes_miner_ports() {
         assert!(COMMON_PORTS.contains(&443));
         assert!(!COMMON_PORTS.contains(&3333));
+    }
+
+    #[test]
+    fn loopback_peers_are_out_of_scope() {
+        // 本机 IPC（mongod 服务端视角 127.0.0.1:27017 ← 127.0.0.1:52672 及其客户端视角）
+        // 两条都应排除；真正的出站连接保留
+        let fixture = "  sl  local_address rem_address st ...\n \
+            0: 0100007F:6989 0100007F:CDC0 01 0:0 00:0 0 111 0 12170\n \
+            1: 0100007F:CDC0 0100007F:6989 01 0:0 00:0 0 1000 0 12171\n \
+            2: 0A00000A:9C4A 69A1C2B4:0D05 01 0:0 00:0 0 0 0 54321\n \
+            3: 0A00000A:9C4B 69A1C2B4:0D05 0A 0:0 00:0 0 0 0 54322\n";
+        let kept: Vec<ConnEntry> = parse_proc_net(fixture, false)
+            .into_iter()
+            .filter(|e| is_outbound_candidate(e, TCP_ESTABLISHED))
+            .collect();
+        assert_eq!(kept.len(), 1, "回环对端与非 ESTABLISHED 均应排除");
+        assert_eq!(kept[0].inode, 54321);
+        assert_eq!(
+            kept[0].remote.ip(),
+            IpAddr::V4(Ipv4Addr::new(180, 194, 161, 105))
+        );
+    }
+
+    #[test]
+    fn ipv4_mapped_loopback_peer_is_out_of_scope() {
+        // 双栈守护进程（监听 ::）接受 IPv4 回环连接时，tcp6 中对端呈 ::ffff:127.0.0.1 形态
+        let mapped_hex = "0000000000000000FFFF00000100007F";
+        let fixture = format!(
+            "  sl  local_address rem_address st ...\n \
+             0: {mapped_hex}:6989 {mapped_hex}:CDC0 01 0:0 00:0 0 111 0 12170\n"
+        );
+        let entries = parse_proc_net(&fixture, true);
+        assert_eq!(entries.len(), 1);
+        let remote = entries[0].remote.ip();
+        assert_eq!(
+            remote,
+            IpAddr::V6(Ipv6Addr::from_str("::ffff:127.0.0.1").unwrap())
+        );
+        assert!(
+            !remote.is_loopback(),
+            "映射形态本身不被 is_loopback 识别，正是需要归一化的原因"
+        );
+        assert!(
+            !is_outbound_candidate(&entries[0], TCP_ESTABLISHED),
+            "归一化后应识别为回环对端"
+        );
     }
 
     #[test]

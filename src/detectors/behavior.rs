@@ -18,7 +18,9 @@
 
 use crate::alert::{Alert, Level};
 use crate::config::BehaviorCfg;
-use crate::detectors::net::{TCP_ESTABLISHED, UDP_CONNECTED, build_inode_map, parse_proc_net};
+use crate::detectors::net::{
+    TCP_ESTABLISHED, UDP_CONNECTED, build_inode_map, is_outbound_candidate, parse_proc_net,
+};
 use crate::notify::Notifier;
 use crate::store::{BehaviorProc, Store};
 use crate::whitelist::Whitelist;
@@ -258,8 +260,7 @@ fn collect() -> Vec<ScanInput> {
         };
         let wanted = if tcp { TCP_ESTABLISHED } else { UDP_CONNECTED };
         for entry in parse_proc_net(&data, ipv6) {
-            if entry.state != wanted || entry.remote.port() == 0 || entry.remote.ip().is_loopback()
-            {
+            if !is_outbound_candidate(&entry, wanted) {
                 continue;
             }
             let Some((_, comm, exe)) = inode_map.get(&entry.inode) else {
