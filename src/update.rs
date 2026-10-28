@@ -8,6 +8,7 @@ use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 const DEFAULT_REPO: &str = "jairwen/honeyguard";
 
@@ -76,21 +77,31 @@ fn valid_sha_file(bytes: &[u8]) -> bool {
     bytes.len() >= 64 && bytes[..64].iter().all(|b| b.is_ascii_hexdigit())
 }
 
+/// 下载安装包/校验文件的单请求总超时，覆盖共享 client 的 10 秒（那是 webhook 告警的量级）：
+/// 数 MB 的 musl 包经国内限速链路 10 秒内读不完 body，会被误判为源不可用。
+const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
+
 /// 依次尝试候选 URL 下载（内容须通过 validator），任一成功即写入 dest。
 async fn download_any(
     client: &reqwest::Client,
     urls: &[String],
     dest: &Path,
     validator: fn(&[u8]) -> bool,
+    timeout: Duration,
 ) -> Result<()> {
     let mut errors = Vec::new();
     for url in urls {
-        match client.get(url).send().await {
+        match client.get(url).timeout(timeout).send().await {
             Ok(resp) if resp.status().is_success() => {
-                let bytes = resp
-                    .bytes()
-                    .await
-                    .with_context(|| format!("读取下载内容失败: {url}"))?;
+                // 响应头 200 不代表 body 能读完（限速链路常在中途超时/中断），
+                // 此处失败同样计入错误并切换下一个源，否则镜像回退永不触发。
+                let bytes = match resp.bytes().await {
+                    Ok(bytes) => bytes,
+                    Err(err) => {
+                        errors.push(format!("{url} → 读取内容失败: {err}"));
+                        continue;
+                    }
+                };
                 if !validator(&bytes) {
                     errors.push(format!("{url} → 内容不合法（镜像返回了错误页？）"));
                     continue;
@@ -342,8 +353,8 @@ pub async fn run(check_only: bool, mirror: Option<&str>) -> Result<()> {
     let binary = work_dir.join("honeyguard");
 
     println!("下载 v{latest}（{target}，直连失败自动切换镜像）…");
-    download_any(&client, &pkg_urls, &pkg, valid_gzip).await?;
-    download_any(&client, &sha_urls, &sha, valid_sha_file).await?;
+    download_any(&client, &pkg_urls, &pkg, valid_gzip, DOWNLOAD_TIMEOUT).await?;
+    download_any(&client, &sha_urls, &sha, valid_sha_file, DOWNLOAD_TIMEOUT).await?;
     verify_sha256(&pkg, &sha)?;
     println!("sha256 校验通过");
     extract_binary(&pkg, &binary)?;
@@ -455,5 +466,99 @@ mod tests {
         let out = dir.path().join("extracted");
         extract_binary(&archive, &out).unwrap();
         assert_eq!(std::fs::read(&out).unwrap(), payload);
+    }
+
+    /// 一次性 HTTP 响应器：读完请求头后发送 head + body，再保持连接 hold 时长后关闭。
+    /// body 短于 Content-Length 且 hold 足够长时，即模拟「响应头 200、body 卡死」。
+    fn spawn_responder(head: String, body: Vec<u8>, hold: Duration) -> String {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/pkg.tar.gz", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            let Ok((mut conn, _)) = listener.accept() else {
+                return;
+            };
+            let mut reader = BufReader::new(conn.try_clone().unwrap());
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 || line.trim_end().is_empty() {
+                    break;
+                }
+            }
+            let _ = conn.write_all(head.as_bytes());
+            let _ = conn.write_all(&body);
+            std::thread::sleep(hold);
+            let _ = conn.shutdown(std::net::Shutdown::Both);
+        });
+        url
+    }
+
+    #[tokio::test]
+    async fn download_falls_back_when_body_stalls() {
+        let gzip = vec![0x1f, 0x8b, 0x08, 0x00, 0x00];
+        // 第一个源：响应头 200 但只发出一部分 body 便卡住（国内直连 release-assets 的典型表现）
+        let stalled = spawn_responder(
+            "HTTP/1.1 200 OK\r\nContent-Length: 1000\r\nConnection: close\r\n\r\n".to_string(),
+            gzip.clone(),
+            Duration::from_secs(6),
+        );
+        // 第二个源：完整返回合法内容
+        let healthy = spawn_responder(
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                gzip.len()
+            ),
+            gzip.clone(),
+            Duration::ZERO,
+        );
+
+        let client = crate::notify::webhook::http_client();
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("pkg.tar.gz");
+        download_any(
+            &client,
+            &[stalled, healthy],
+            &dest,
+            valid_gzip,
+            Duration::from_secs(2),
+        )
+        .await
+        .expect("body 卡死的源应计入错误并回退到下一个镜像，而非整体失败");
+        assert_eq!(std::fs::read(&dest).unwrap(), gzip);
+    }
+
+    #[tokio::test]
+    async fn download_reports_every_failed_source() {
+        let stalled = spawn_responder(
+            "HTTP/1.1 200 OK\r\nContent-Length: 1000\r\nConnection: close\r\n\r\n".to_string(),
+            vec![0x1f, 0x8b],
+            Duration::from_secs(6),
+        );
+        let html = spawn_responder(
+            "HTTP/1.1 200 OK\r\nContent-Length: 14\r\nConnection: close\r\n\r\n".to_string(),
+            b"<html>x</html>".to_vec(),
+            Duration::ZERO,
+        );
+
+        let client = crate::notify::webhook::http_client();
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("pkg.tar.gz");
+        let err = download_any(
+            &client,
+            &[stalled.clone(), html.clone()],
+            &dest,
+            valid_gzip,
+            Duration::from_secs(2),
+        )
+        .await
+        .expect_err("全部源失败应返回错误");
+        let msg = err.to_string();
+        assert!(msg.contains("全部下载源失败"), "{msg}");
+        assert!(
+            msg.contains(&stalled) && msg.contains("读取内容失败"),
+            "{msg}"
+        );
+        assert!(msg.contains(&html) && msg.contains("内容不合法"), "{msg}");
+        assert!(!dest.exists(), "失败时不应落盘");
     }
 }
