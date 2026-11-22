@@ -1,6 +1,6 @@
 //! DET-03 可疑出站连接（PRD §5.1）：周期解析 `/proc/net/tcp{,6}` 与 `udp{,6}`。
 //!
-//! 规则：目的端口命中矿池黑名单或 IP 命中本地黑名单文件 → critical；
+//! 规则：IP 命中本地黑名单文件 → critical；
 //! 非 53/80/123/443 端口上的 ESTABLISHED 连接持续 ≥ 3 个扫描周期 → warning
 //! （与 DET-09 行为基线联动去噪：连接可归属且归属进程已被行为画像跟踪——
 //! 含学习期与广泛连接型——时不触发，交由行为基线判定；无法归属进程的连接仍告警；
@@ -125,7 +125,6 @@ pub async fn run(
     let mut sustained: HashMap<SocketAddr, (u32, bool)> = HashMap::new();
     tracing::info!(
         interval_sec = cfg.interval_sec,
-        bad_ports = cfg.bad_ports.len(),
         blocklist_nets = blocklist.len(),
         behavior_linked = store.is_some(),
         "outbound 检测器已启动"
@@ -164,16 +163,6 @@ pub async fn run(
             }
             let rip = remote.ip();
             if whitelist.allows_ip(rip) {
-                continue;
-            }
-            if cfg.bad_ports.contains(&remote.port()) {
-                let alert = build_alert(
-                    Level::Critical,
-                    "可疑外连：矿池/可疑端口",
-                    &format!("命中可疑端口黑名单 {remote}"),
-                    entry,
-                );
-                notifier.publish(alert.with_key(remote.to_string())).await?;
                 continue;
             }
             if blocklist.iter().any(|net| net.contains(&rip)) {
@@ -251,7 +240,7 @@ pub(crate) fn exe_path_string(path: &Path) -> String {
 /// 自身出站（出口 IP 探测、告警 webhook、版本检查/升级下载）对端多为 CDN，IP 轮换是常态，
 /// 不存在可学习的“通信习惯”，纳入画像只会在学习期满后持续误报“通信对象异常”。
 /// 同一二进制的 CLI 调用（`sudo honeyguard update`）pid 不同但 exe 相同，故以 exe 为主、
-/// 守护进程 pid 兜底。黑名单类规则（矿池端口 / 恶意 IP）不走此免除。
+/// 守护进程 pid 兜底。恶意 IP 黑名单规则不走此免除。
 pub(crate) struct SelfIdentity {
     pid: i32,
     exe: Option<String>,
@@ -399,7 +388,7 @@ mod tests {
             established.remote.ip(),
             IpAddr::V4(Ipv4Addr::new(180, 194, 161, 105))
         );
-        assert_eq!(established.remote.port(), 0x0D05, "3333 矿池端口");
+        assert_eq!(established.remote.port(), 0x0D05, "端口 3333");
         assert_eq!(established.state, TCP_ESTABLISHED);
         assert_eq!(established.uid, 0);
         assert_eq!(established.inode, 54321);
@@ -429,9 +418,9 @@ mod tests {
     }
 
     #[test]
-    fn common_port_set_excludes_miner_ports() {
+    fn common_port_set_only_lists_standard_ports() {
         assert!(COMMON_PORTS.contains(&443));
-        assert!(!COMMON_PORTS.contains(&3333));
+        assert!(!COMMON_PORTS.contains(&8080));
     }
 
     #[test]

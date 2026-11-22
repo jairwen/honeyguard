@@ -32,7 +32,7 @@
 ### 2.2 典型场景
 
 1. 半夜有人对 22 端口爆破 → 手机收到 critical 告警（含来源 IP、尝试次数）。
-2. 服务器被植入挖矿程序，对外连接矿池 → 收到可疑外连 + 高 CPU 进程告警。
+2. 服务器被植入挖矿程序 → 收到高 CPU 挖矿进程告警；外连矿池由可疑长连接与行为基线观察。
 3. 攻击者爆破成功后写入 `authorized_keys` / 新建用户 / 添加 systemd timer 持久化 → 收到文件变更与持久化痕迹告警。
 4. 任意一次 SSH 登录成功 → 收到登录通知（IP、用户、方式），异地登录立刻察觉。
 
@@ -87,7 +87,7 @@
 |---|---|---|---|
 | DET-01 | SSH 暴力破解检测 | journald / auth.log | P0 |
 | DET-02 | SSH 登录成功通知 | journald / auth.log | P0 |
-| DET-03 | 可疑出站连接（矿池端口 / 恶意 IP / 可疑长连接） | /proc/net/tcp{,6} | P0 |
+| DET-03 | 可疑出站连接（恶意 IP / 可疑长连接） | /proc/net/tcp{,6} | P0 |
 | DET-04 | 可疑进程（持续高 CPU + 挖矿/伪装特征） | /proc/[pid]/* | P0 |
 | DET-05 | 关键文件完整性与持久化痕迹 | 文件基线扫描 + notify | P1 |
 | DET-06 | 新增监听端口 | /proc/net/tcp{,6}（LISTEN） | P1 |
@@ -102,7 +102,7 @@
 - **新进程**首次出现在出站连接中 → `warning`（新落地的程序在对外通信，进入学习期观测）。
 - **广泛连接型识别**（P2P/BT/种子类）：远端 IP 去重数达到阈值（默认 50，可配）即自动标记——这类进程连海量陌生节点是其本性，陌生 IP 不再告警，改为监控**并发激增**（当前并发 ≥ 历史峰值 N 倍且 ≥ 绝对下限，默认 4 倍/40 条）→ `warning`（识别被滥用做扫描/DDoS）。峰值带迟滞回落，长期静默后不会误报。
 - `honeyguard baseline` 清空行为画像重新学习。
-- **honeyguard 自身不入画像、不告警**（守护进程 pid 或同一二进制路径，含 `honeyguard update` 等 CLI 调用）：其出站（出口 IP 探测、告警 webhook、版本检查/升级下载）对端多为 CDN，IP 轮换是常态，不存在可学习的通信习惯，否则学习期满后会持续误报“通信对象异常”。DET-03 的黑名单类规则（矿池端口/恶意 IP）对自身仍然生效。
+- **honeyguard 自身不入画像、不告警**（守护进程 pid 或同一二进制路径，含 `honeyguard update` 等 CLI 调用）：其出站（出口 IP 探测、告警 webhook、版本检查/升级下载）对端多为 CDN，IP 轮换是常态，不存在可学习的通信习惯，否则学习期满后会持续误报“通信对象异常”。DET-03 的恶意 IP 黑名单规则对自身仍然生效。
 - 已知局限（后续优化）：进程身份以 exe 路径为准，脚本/解释器类程序（python 跑不同脚本）共享同一身份。
 
 **DET-01 SSH 暴力破解检测（P0）**
@@ -119,7 +119,6 @@
 - 每 `interval`（默认 30s）解析 `/proc/net/tcp`、`/proc/net/tcp6`（含 UDP）。
 - 范围：仅对端为非回环地址的已建立连接。对端为回环（含 tcp6 中的 `::ffff:127.0.0.1` 映射形态）即本机 IPC（应用 ↔ mongod/redis 等），不属于出站，不进入任何规则（与 DET-09 口径一致）。
 - 规则：
-  - 目的端口命中内置矿池/可疑端口列表（3333、4444、5555、7777、8888、14444、14433 等，列表外置可配置）→ `critical`。
   - 目的 IP 命中恶意 IP 集合（P0 支持本地配置文件导入，P2 支持在线 feed 如 firehol/abuse.ch）→ `critical`。
   - 非 80/443 的非常用端口上的长连接（ESTABLISHED，持续 ≥ N 个周期）→ `warning`。与 DET-09 行为基线联动去噪：连接可归属且归属进程已被行为画像跟踪（含学习期与广泛连接型）时不触发，由 DET-09 负责其通信异常判定；honeyguard 自身的 socket 同样不触发（自身不入画像，见 DET-09）；无法归属进程的连接仍适用本规则。
 - 告警内容含本地进程归属（通过 `/proc/[pid]/fd` 的 socket inode 反查，MVP 若反查开销大可只报 IP:port，进程归属允许降级到 P1）。
@@ -174,7 +173,7 @@
 - 超时 10s；非 2xx 视为失败进入重试。
 
 **ALR-03 分级**
-- `critical`：爆破命中、成功登录（new_ip 模式下）、矿池外连、挖矿进程、authorized_keys/shadow 变更、新增 root 用户。
+- `critical`：爆破命中、成功登录（new_ip 模式下）、恶意 IP 外连、挖矿进程、authorized_keys/shadow 变更、新增 root 用户。
 - `warning`：可疑长连接、新增监听端口、一般文件变更、新增 SUID。
 - `info`：登录通知（all 模式）、高 CPU 无特征进程。
 - 用户可为每类事件覆写级别，并设最低推送级别（如只推 warning 以上）。
@@ -243,7 +242,7 @@ honeyguard version
 | NF-01 性能 | 常驻 RSS < 50MB；CPU 平均 < 1%（1C1G 场景可长期运行）；单轮 /proc 全量扫描 < 100ms |
 | NF-02 可靠性 | 检测器 panic 被捕获并重启该 task；进程异常退出由 systemd 自动拉起；状态持久化使其重启后不重复告警、不丢待发告警 |
 | NF-03 安全 | 配置文件权限 0600；不外传任何数据（除用户配置的 Webhook 地址）；提供告警内容脱敏开关（隐藏 IP 末段/用户名） |
-| NF-04 可维护性 | 检测规则（端口黑名单、挖矿特征、文件清单、白名单）与代码分离，均可在配置/规则文件中增删 |
+| NF-04 可维护性 | 检测规则（挖矿特征、文件清单、白名单、IP 黑名单文件）与代码分离，均可在配置/规则文件中增删 |
 | NF-05 可观测 | 结构化日志（tracing → journald），关键路径有耗时可观测点 |
 | NF-06 构建 | GitHub Actions CI：test + 多目标交叉编译 + release 产物自动打包（二进制 + sha256 + install.sh） |
 
@@ -338,7 +337,6 @@ mode = "all"                 # all | new_ip | off
 
 [detector.outbound]
 interval_sec = 30
-bad_ports = [3333, 4444, 5555, 7777, 8888, 14444, 14433]
 blocklist_files = []         # 本地恶意 IP 文件路径（每行一个 CIDR）
 
 [detector.process]
@@ -374,6 +372,6 @@ processes = []
 
 | 级别 | 事件 |
 |---|---|
-| critical | 爆破命中、可疑外连（矿池/恶意 IP）、挖矿进程、authorized_keys/shadow/sudoers 变更、新增 root 用户、new_ip 模式下的陌生登录 |
+| critical | 爆破命中、可疑外连（恶意 IP）、挖矿进程、authorized_keys/shadow/sudoers 变更、新增 root 用户、new_ip 模式下的陌生登录 |
 | warning | 可疑长连接、新增监听端口、一般受控文件变更、新增 SUID、端口扫描（P2） |
 | info | 登录通知（all 模式）、高 CPU 无特征进程、心跳、每日摘要 |

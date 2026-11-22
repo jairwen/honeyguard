@@ -15,7 +15,7 @@
 | DET-01 SSH 暴力破解检测（journald / auth.log 双日志源） | ✅ |
 | 响应动作：达到爆破阈值自动封禁来源 IP（iptables/nftables 自动检测，专用链隔离；持久化 + 到期自动解封 + 内网防误封；`bans` / `ban` / `unban` 命令管理） | ✅ |
 | DET-02 SSH 登录成功通知（all / new_ip 模式，已见 IP 持久化） | ✅ |
-| DET-03 可疑出站连接（矿池端口 / 恶意 IP 黑名单 / 可疑长连接 + 进程归属） | ✅ |
+| DET-03 可疑出站连接（恶意 IP 黑名单 / 可疑长连接 + 进程归属） | ✅ |
 | DET-04 挖矿/高 CPU 进程检测（/proc 差分采样 + 特征库 + 可疑路径） | ✅ |
 | 检测器崩溃自愈（supervised 指数退避重启） | ✅ |
 | 告警 outbox 持久化（SQLite，断网重试/重启补发，critical 不丢） | ✅ |

@@ -585,10 +585,10 @@ fn cmd_once(cli: &Cli) -> Result<()> {
         d.ssh_login.enabled, d.ssh_login.mode
     );
     println!(
-        "  outbound        : enabled={} interval={}s bad_ports={} 个",
+        "  outbound        : enabled={} interval={}s blocklist_files={} 个",
         d.outbound.enabled,
         d.outbound.interval_sec,
-        d.outbound.bad_ports.len()
+        d.outbound.blocklist_files.len()
     );
     println!(
         "  process         : enabled={} interval={}s cpu>={}% lasting={}s",

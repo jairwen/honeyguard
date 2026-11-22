@@ -91,8 +91,6 @@ mode = "all"
 [detector.outbound]
 enabled = true
 interval_sec = 30
-# 常见矿池/stratum 端口（可增删）
-bad_ports = [3333, 4444, 5555, 7777, 8888, 14433, 14444]
 # 本地恶意 IP/CIDR 黑名单文件（每行一个 IP 或 CIDR）
 blocklist_files = []
 

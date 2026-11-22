@@ -232,7 +232,8 @@ pub enum SshLoginMode {
 pub struct OutboundCfg {
     pub enabled: bool,
     pub interval_sec: u64,
-    /// 矿池/stratum 等可疑端口黑名单。
+    /// 已废弃、无效果：端口黑名单规则已移除（自建代理服务等常用端口易误报）。
+    /// 字段仅为兼容存量配置保留，避免升级后 `deny_unknown_fields` 解析失败。
     pub bad_ports: Vec<u16>,
     /// 本地恶意 IP/CIDR 黑名单文件路径。
     pub blocklist_files: Vec<PathBuf>,
@@ -243,7 +244,7 @@ impl Default for OutboundCfg {
         Self {
             enabled: true,
             interval_sec: 30,
-            bad_ports: vec![3333, 4444, 5555, 7777, 8888, 14433, 14444],
+            bad_ports: Vec::new(),
             blocklist_files: Vec::new(),
         }
     }
@@ -452,9 +453,16 @@ mod tests {
         let cfg = toml::from_str::<Config>(Config::example()).expect("示例配置应可解析");
         cfg.validate().expect("示例配置应通过校验");
         assert_eq!(cfg.detector.ssh_bruteforce.max_failures, 20);
-        assert_eq!(cfg.detector.outbound.bad_ports.len(), 7);
         assert!(matches!(cfg.detector.ssh_login.mode, SshLoginMode::All));
         assert_eq!(cfg.alert.min_level, Level::Warning);
+    }
+
+    #[test]
+    fn deprecated_bad_ports_still_parses() {
+        // 端口黑名单规则已移除，但存量配置仍写着 bad_ports 时必须能解析（自动升级安全）
+        let cfg = toml::from_str::<Config>("[detector.outbound]\nbad_ports = [3333, 8888]\n")
+            .expect("含废弃字段的配置应可解析");
+        assert_eq!(cfg.detector.outbound.bad_ports, vec![3333, 8888]);
     }
 
     #[test]
