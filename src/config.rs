@@ -26,9 +26,11 @@ pub struct ServerCfg {
     /// 告警主机名追加出口公网 IP（显示为 `NODEA(1.2.3.4)`）。
     /// 通过 api.ipify.org / ip.sb / ifconfig.me 探测，默认开启。
     pub egress_ip: bool,
-    /// GitHub 加速镜像前缀（`honeyguard update` 下载用），如 "https://ghproxy.com/"。
+    /// GitHub 加速镜像前缀（`honeyguard update` 与自动升级下载用），如 "https://ghproxy.com/"。
     /// 留空则直连优先、失败后自动尝试内置公共镜像；环境变量 HONEYGUARD_MIRROR 优先于此。
     pub update_mirror: Option<String>,
+    /// 定时自动升级（PRD DEP-03）。
+    pub auto_update: AutoUpdateCfg,
 }
 
 impl Default for ServerCfg {
@@ -37,6 +39,27 @@ impl Default for ServerCfg {
             host: None,
             egress_ip: true,
             update_mirror: None,
+            auto_update: AutoUpdateCfg::default(),
+        }
+    }
+}
+
+/// 自动升级：常驻运行期间定时检查 Release，有新版本即下载校验、替换二进制并重启服务。
+/// 下载源的镜像策略与 `honeyguard update` 相同（内置公共镜像同样是信任点）。
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct AutoUpdateCfg {
+    pub enabled: bool,
+    /// 检查间隔（秒），默认 6 小时。服务重启不打断周期（按上次成功检查的时刻续算）；
+    /// 小于 5 分钟按 5 分钟计。
+    pub interval_sec: u64,
+}
+
+impl Default for AutoUpdateCfg {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            interval_sec: 6 * 3600,
         }
     }
 }
@@ -455,6 +478,24 @@ mod tests {
         assert_eq!(cfg.detector.ssh_bruteforce.max_failures, 20);
         assert!(matches!(cfg.detector.ssh_login.mode, SshLoginMode::All));
         assert_eq!(cfg.alert.min_level, Level::Warning);
+        assert!(cfg.server.auto_update.enabled, "示例配置默认开启自动升级");
+        assert_eq!(cfg.server.auto_update.interval_sec, 6 * 3600);
+    }
+
+    #[test]
+    fn auto_update_defaults_and_overrides() {
+        // 存量配置没有 [server.auto_update] 段：取默认（开启、6 小时）
+        let cfg = toml::from_str::<Config>("[alert]\nwebhooks = []\n").unwrap();
+        assert!(cfg.server.auto_update.enabled);
+        assert_eq!(cfg.server.auto_update.interval_sec, 6 * 3600);
+
+        let cfg = toml::from_str::<Config>("[server.auto_update]\nenabled = false\n").unwrap();
+        assert!(!cfg.server.auto_update.enabled);
+        assert_eq!(
+            cfg.server.auto_update.interval_sec,
+            6 * 3600,
+            "未填的字段取默认"
+        );
     }
 
     #[test]

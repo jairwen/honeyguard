@@ -4,6 +4,8 @@ use honeyguard::alert::{self, Alert, Level};
 use honeyguard::ban;
 use honeyguard::config::{self, Config};
 use honeyguard::detectors;
+use honeyguard::egress;
+use honeyguard::lifecycle;
 use honeyguard::logging;
 use honeyguard::notify::{Delivery, Notifier, webhook};
 use honeyguard::whitelist::Whitelist;
@@ -138,18 +140,24 @@ async fn cmd_run(cli: &Cli) -> Result<()> {
         }
     };
     let client = webhook::http_client();
+    // 启动上报要带节点标识 NODEA(1.2.3.4)：先尽力探测一次出口 IP，离线时按预算放弃
+    if cfg.server.egress_ip {
+        egress::refresh_within(&client, egress::STARTUP_PROBE_BUDGET).await;
+    }
     let (notifier, done) = Notifier::start(
         cfg.alert.clone(),
         cfg.alert.webhooks.clone(),
         Delivery::Webhook(client.clone()),
         store.clone(),
     );
+    let startup = report_startup(&notifier, store.as_deref()).await;
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
         host = %alert::host(),
         webhooks = cfg.alert.webhooks.len(),
         min_level = %cfg.alert.min_level,
         persist = store.is_some(),
+        startup = ?startup,
         "honeyguard 已启动"
     );
 
@@ -267,12 +275,30 @@ async fn cmd_run(cli: &Cli) -> Result<()> {
         detector_tasks.push(tokio::spawn(detectors::supervised(
             "egress",
             token,
-            move |t| honeyguard::egress::run(egress_client.clone(), t),
+            move |t| egress::run(egress_client.clone(), t),
+        )));
+    }
+    // 自动升级（PRD DEP-03）：定时检查 Release，有新版即替换二进制并重启服务
+    if cfg.server.auto_update.enabled {
+        let (interval_sec, mirror) = (
+            cfg.server.auto_update.interval_sec,
+            cfg.server.update_mirror.clone(),
+        );
+        let (n, st) = (notifier.clone(), store.clone());
+        let token = shutdown_token.clone();
+        detector_tasks.push(tokio::spawn(detectors::supervised(
+            "auto_update",
+            token,
+            move |t| {
+                honeyguard::update::auto_run(interval_sec, mirror.clone(), n.clone(), st.clone(), t)
+            },
         )));
     }
 
     wait_for_shutdown().await;
     tracing::info!("收到退出信号，正在停止…");
+    // 记下正常退出：下次启动据此上报为“服务重启”，而不是“上次运行未正常退出”
+    lifecycle::record_stop(store.as_deref(), chrono::Utc::now().timestamp());
     shutdown_token.cancel();
     for task in detector_tasks {
         let _ = task.await;
@@ -280,6 +306,22 @@ async fn cmd_run(cli: &Cli) -> Result<()> {
     drop(notifier);
     done.shutdown().await?;
     Ok(())
+}
+
+/// 启动上报（PRD ALR-11）：每次进程启动推送一条——首次启动 / 服务重启 / 机器重启 /
+/// 异常退出后拉起，附版本变化与离线期间的积压告警数。返回判定出的启动原因（记日志用）。
+async fn report_startup(
+    notifier: &Notifier,
+    store: Option<&honeyguard::store::Store>,
+) -> lifecycle::Reason {
+    let boot = lifecycle::boot_id();
+    let startup = lifecycle::record_start(store, boot.as_deref(), chrono::Utc::now().timestamp());
+    if let Some(alert) = startup.alert
+        && let Err(err) = notifier.publish(alert).await
+    {
+        tracing::warn!(error = %err, "启动上报发布失败");
+    }
+    startup.reason
 }
 
 fn cmd_baseline(cli: &Cli) -> Result<()> {
@@ -605,7 +647,7 @@ async fn cmd_test_alert(cli: &Cli) -> Result<()> {
     let client = webhook::http_client();
     // 尽力探测一次出口 IP，让测试告警也带上 NODEA(x.x.x.x) 标识
     if cfg.server.egress_ip {
-        let _ = honeyguard::egress::refresh(&client).await;
+        let _ = egress::refresh(&client).await;
     }
     println!(
         "发送测试告警到 {} 个 Webhook…（主机标识：{}）",

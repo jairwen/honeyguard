@@ -61,22 +61,50 @@ pub async fn refresh(client: &reqwest::Client) -> Result<String> {
     Ok(ip)
 }
 
+/// 启动路径的探测预算：启动上报要带节点标识 `NODEA(1.2.3.4)`，但离线时不能无限拖住启动。
+pub const STARTUP_PROBE_BUDGET: Duration = Duration::from_secs(10);
+
+/// 有界探测（[`STARTUP_PROBE_BUDGET`] 量级）：成功或超时/失败都返回，供调用方继续启动。
+/// 返回是否探测成功。
+pub async fn refresh_within(client: &reqwest::Client, budget: Duration) -> bool {
+    match tokio::time::timeout(budget, refresh(client)).await {
+        Ok(Ok(_)) => true,
+        Ok(Err(err)) => {
+            tracing::warn!(error = %err, "出口 IP 探测失败（本次上报不带出口 IP）");
+            false
+        }
+        Err(_) => {
+            tracing::warn!(
+                budget_sec = budget.as_secs(),
+                "出口 IP 探测超时（本次上报不带出口 IP）"
+            );
+            false
+        }
+    }
+}
+
 /// 常驻刷新任务（由 supervised 监督）。
 pub async fn run(client: reqwest::Client, token: CancellationToken) -> Result<()> {
     tracing::info!(
         interval_sec = REFRESH_INTERVAL.as_secs(),
         "egress 出口 IP 探测任务已启动"
     );
+    // 启动路径已先行探测到出口 IP 时不重复请求
+    if alert::egress_ip().is_none()
+        && let Err(err) = refresh(&client).await
+    {
+        tracing::warn!(error = %err, "出口 IP 探测失败（保留上次结果）");
+    }
     loop {
-        if let Err(err) = refresh(&client).await {
-            tracing::warn!(error = %err, "出口 IP 探测失败（保留上次结果）");
-        }
         tokio::select! {
             _ = tokio::time::sleep(REFRESH_INTERVAL) => {}
             _ = token.cancelled() => {
                 tracing::info!("egress 探测任务退出");
                 return Ok(());
             }
+        }
+        if let Err(err) = refresh(&client).await {
+            tracing::warn!(error = %err, "出口 IP 探测失败（保留上次结果）");
         }
     }
 }

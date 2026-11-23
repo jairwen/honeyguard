@@ -150,14 +150,16 @@ pub(crate) fn until_next_hour(at_hour: u8) -> Duration {
     (target - now).to_std().unwrap_or(Duration::from_secs(3600))
 }
 
-fn human_duration(d: Duration) -> String {
+pub(crate) fn human_duration(d: Duration) -> String {
     let secs = d.as_secs();
     if secs >= 86400 {
         format!("{} 天 {} 小时", secs / 86400, (secs % 86400) / 3600)
     } else if secs >= 3600 {
         format!("{} 小时 {} 分", secs / 3600, (secs % 3600) / 60)
+    } else if secs >= 60 {
+        format!("{} 分钟", secs / 60)
     } else {
-        format!("{} 分钟", secs.max(1) / 60)
+        format!("{secs} 秒")
     }
 }
 
@@ -176,6 +178,8 @@ mod tests {
     fn human_duration_formats() {
         assert_eq!(human_duration(Duration::from_secs(90_000)), "1 天 1 小时");
         assert_eq!(human_duration(Duration::from_secs(3660)), "1 小时 1 分");
-        assert_eq!(human_duration(Duration::from_secs(30)), "0 分钟");
+        assert_eq!(human_duration(Duration::from_secs(90)), "1 分钟");
+        assert_eq!(human_duration(Duration::from_secs(30)), "30 秒");
+        assert_eq!(human_duration(Duration::ZERO), "0 秒");
     }
 }

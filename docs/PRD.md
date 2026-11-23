@@ -166,6 +166,7 @@
 | ALR-08 | 心跳报平安（可开关） | P1 |
 | ALR-09 | 每日摘要 | P1 |
 | ALR-10 | 多 Webhook 目标并发投递 | P1 |
+| ALR-11 | 启动/重启上报：每次进程启动推送一条通知 | P1 |
 
 **ALR-01/02 Webhook 通道**
 - `POST` 用户配置的 URL，Content-Type: application/json。
@@ -197,6 +198,13 @@
 **ALR-09 每日摘要（P1）**
 - 每日固定时间（默认 08:00 本机时区）推送前 24h 各类事件统计与 Top 来源 IP。
 
+**ALR-11 启动/重启上报（P1）**
+- 服务每次启动（`honeyguard run` 进程拉起）推送一条通知，无论重启还是首次启动；绕过 `min_level` 过滤。
+- 启动原因由状态库 `runtime.last_run` 与 boot_id 判定：首次启动（无历史记录）/ 服务重启（上次正常停止）/ 机器重启（boot_id 变化）/ 上次运行未正常退出后被拉起（崩溃、被杀、OOM，systemd `Restart=always`）。
+- 正文含：版本变化（上次运行版本 → 当前版本）、距上次停止/启动的时长、离线期间积压的待发告警数。异常退出为 `warning` 并给出排查入口（`journalctl -u honeyguard`），其余为 `info`。
+- 正常退出（SIGTERM/SIGINT 收尾）时写入停止时刻；SIGKILL/断电写不了，下次启动即判为未正常退出。
+- 防刷屏：正常重启（上次正常停止）始终逐条上报。「异常退出后被拉起」的上报 5 分钟内至多推送一条，其后的只计数、并入下一条上报（计数持久化在状态库——告警管道的聚合/静默状态在进程内存里，拦不住跨进程的崩溃循环）。机器重启不属于崩溃循环，照常上报。
+
 ### 5.3 配置与 CLI
 
 | ID | 需求 | 优先级 |
@@ -227,7 +235,7 @@ honeyguard version
 |---|---|---|
 | DEP-01 | musl 静态单二进制：x86_64 + aarch64，GitHub Releases 分发 | P0 |
 | DEP-02 | `install.sh` 一键安装：`curl -fsSL ... | bash` | P0 |
-| DEP-03 | 升级路径：`honeyguard update` 自更新（查最新 Release → 下载 → sha256 校验 → 原子替换 → 重启服务）；`--check` 只检查；或重跑 install.sh | P1 |
+| DEP-03 | 升级路径：`honeyguard update` 自更新（查最新 Release → 下载 → sha256 校验 → 原子替换 → 重启服务）；`--check` 只检查；或重跑 install.sh。**自动升级**：常驻期间默认每 6 小时检查一次，有新版自动执行同一套步骤并重启服务，推送「已自动升级」通知（失败仅记日志，同一版本连续 2 次安装失败才上报一次） | P1 |
 | DEP-04 | 干净卸载：`install.sh --uninstall`（停服务、删二进制/配置可选保留） | P0 |
 
 - install.sh 职责：识别架构 → 下载对应二进制（校验 sha256）→ 安装到 `/usr/local/bin/honeyguard` → 生成带注释的默认配置（不覆盖已存在配置）→ 安装 systemd unit（`Restart=always`，`After=network-online.target`）→ `systemctl enable --now honeyguard` → 提示 `test-alert` 验证。
@@ -309,6 +317,10 @@ honeyguard version
 host = ""            # 留空自动取 hostname
 egress_ip = true     # 告警主机名追加出口公网 IP：NODEA(1.2.3.4)
 
+[server.auto_update]
+enabled = true       # 常驻期间定时检查 Release 并自动升级
+interval_sec = 21600 # 检查间隔，默认 6 小时（服务重启不打断周期）
+
 [alert]
 min_level = "warning"        # 只推送该级别以上：info | warning | critical
 rate_limit_per_min = 10      # 每分钟最大出站条数（critical 不受限）
@@ -373,5 +385,5 @@ processes = []
 | 级别 | 事件 |
 |---|---|
 | critical | 爆破命中、可疑外连（恶意 IP）、挖矿进程、authorized_keys/shadow/sudoers 变更、新增 root 用户、new_ip 模式下的陌生登录 |
-| warning | 可疑长连接、新增监听端口、一般受控文件变更、新增 SUID、端口扫描（P2） |
-| info | 登录通知（all 模式）、高 CPU 无特征进程、心跳、每日摘要 |
+| warning | 可疑长连接、新增监听端口、一般受控文件变更、新增 SUID、端口扫描（P2）、上次运行未正常退出后被拉起（ALR-11）、自动升级失败/升级后未能重启 |
+| info | 登录通知（all 模式）、高 CPU 无特征进程、心跳、每日摘要、启动/重启上报（ALR-11）、自动升级完成 |

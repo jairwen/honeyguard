@@ -13,6 +13,15 @@ egress_ip = true
 # 留空则直连优先、失败后自动尝试内置公共镜像；环境变量 HONEYGUARD_MIRROR 优先于此
 update_mirror = ""
 
+# 自动升级：服务常驻期间定时检查 GitHub Release，有新版本即下载、sha256 校验、替换二进制
+# 并重启服务，同时推送「已自动升级」与重启后的「已启动」通知。
+# 下载源的镜像策略同上方 update_mirror（内置公共镜像同样是信任点，在意请配置自建镜像）
+[server.auto_update]
+enabled = true
+# 检查间隔（秒），默认 6 小时。服务重启不打断周期（按上次成功检查的时刻续算）；
+# 检查/安装失败 30 分钟后重试；小于 300 按 300 计
+interval_sec = 21600
+
 [alert]
 # 最低推送级别：info | warning | critical（低于该级别的只记日志不推送）
 min_level = "warning"

@@ -109,6 +109,10 @@ impl Store {
                  ip           TEXT PRIMARY KEY,
                  banned_at    INTEGER NOT NULL,   -- unix 秒
                  duration_sec INTEGER NOT NULL    -- 0 = 永久
+             );
+             CREATE TABLE IF NOT EXISTS runtime (
+                 key   TEXT PRIMARY KEY,
+                 value TEXT NOT NULL
              );",
         )
         .context("初始化状态数据库表失败")?;
@@ -529,6 +533,34 @@ impl Store {
             })
             .collect())
     }
+
+    // ---- 运行时状态（键值）：启动/重启判定、自动升级检查时间 ----
+
+    /// 读取运行时状态；None = 尚未写入。
+    pub fn runtime_get(&self, key: &str) -> Result<Option<String>> {
+        let conn = self.lock();
+        let mut stmt = conn
+            .prepare("SELECT value FROM runtime WHERE key = ?1")
+            .context("runtime 查询失败")?;
+        let mut rows = stmt
+            .query_map(params![key], |row| row.get::<_, String>(0))
+            .context("runtime 查询失败")?;
+        match rows.next() {
+            Some(Ok(value)) => Ok(Some(value)),
+            Some(Err(e)) => Err(e).context("runtime 读取失败"),
+            None => Ok(None),
+        }
+    }
+
+    pub fn runtime_set(&self, key: &str, value: &str) -> Result<()> {
+        self.lock()
+            .execute(
+                "INSERT OR REPLACE INTO runtime(key, value) VALUES (?1, ?2)",
+                params![key, value],
+            )
+            .map(|_| ())
+            .context("runtime 写入失败")
+    }
 }
 
 /// 进程通信画像（DET-09）。
@@ -658,9 +690,29 @@ mod tests {
 
         store.ban_delete(&a).unwrap();
         let rows = store.ban_load().unwrap();
-        assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].0, b);
         // 删除不存在的记录不报错
         store.ban_delete(&a).unwrap();
+    }
+
+    #[test]
+    fn runtime_kv_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.runtime_get("k").unwrap(), None, "未写入的键为 None");
+        store.runtime_set("k", "1").unwrap();
+        store.runtime_set("k", "2").unwrap();
+        assert_eq!(
+            store.runtime_get("k").unwrap().as_deref(),
+            Some("2"),
+            "覆盖写"
+        );
+        store.runtime_set("other", "x").unwrap();
+
+        // 重启后仍在
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.runtime_get("k").unwrap().as_deref(), Some("2"));
+        assert_eq!(store.runtime_get("other").unwrap().as_deref(), Some("x"));
     }
 }

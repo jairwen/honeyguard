@@ -115,6 +115,12 @@ impl Notifier {
             (Delivery::Webhook(_), Some(_)) => Some(Arc::new(Notify::new())),
             _ => None,
         };
+        // 积压计数必须在任何发布端交出之前同步取得：否则刚入队的启动上报
+        // 可能赶在 worker 计数之前落库，被当成“重启前就积压的告警”记进日志。
+        let backlog = match (&delivery, &worker_store) {
+            (Delivery::Webhook(_), Some(store)) => store.outbox_pending_count(),
+            _ => Ok(0),
+        };
         let dispatcher = tokio::spawn(dispatcher_loop(
             rx,
             cfg,
@@ -127,7 +133,8 @@ impl Notifier {
         let worker = match (client, worker_store, wake) {
             (Some(client), Some(store), Some(wake)) => {
                 let stop = CancellationToken::new();
-                let handle = tokio::spawn(outbox_worker(client, store, wake, stop.clone()));
+                let handle =
+                    tokio::spawn(outbox_worker(client, store, wake, stop.clone(), backlog));
                 Some((handle, stop))
             }
             _ => None,
@@ -145,16 +152,18 @@ impl Notifier {
 }
 
 /// outbox worker：被唤醒或每 5s 扫描到期条目投递；指数退避（封顶 5 分钟）。
+/// `backlog` 是启动前就存在的积压条数（由 [`Notifier::start`] 在发布端交出前取得）。
 async fn outbox_worker(
     client: reqwest::Client,
     store: Arc<Store>,
     wake: Arc<Notify>,
     stop: CancellationToken,
+    backlog: anyhow::Result<i64>,
 ) {
     const TICK: Duration = Duration::from_secs(5);
     const BATCH: i64 = 50;
 
-    match store.outbox_pending_count() {
+    match backlog {
         Ok(0) => {}
         Ok(n) => tracing::info!(pending = n, "outbox 启动：发现积压待发告警，将自动补发"),
         Err(err) => tracing::warn!(error = %err, "outbox 积压计数失败"),

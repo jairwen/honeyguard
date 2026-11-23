@@ -23,6 +23,8 @@
 | DET-06 新增监听端口告警（含归属进程） | ✅ |
 | DET-09 行为基线：长期学习进程通信画像，陌生通信对象/新进程外连告警，P2P 类自动识别并转为并发激增监控 | ✅ |
 | 心跳报平安 + 每日摘要 | ✅ |
+| 启动/重启上报：每次进程启动推送一条（首次启动 / 服务重启 / 机器重启 / 异常退出后拉起，附版本变化） | ✅ |
+| 自动升级（默认每 6 小时检查 Release，下载校验后替换二进制并重启服务） | ✅ |
 | `baseline` 重建基线 / `doctor` 环境自检 / `update` 自更新 | ✅ |
 | eBPF 实时审计（exec / connect / DNS） | M3 |
 
@@ -62,7 +64,9 @@ honeyguard test-alert                  # 2. 验证推送通道
 journalctl -u honeyguard -f            # 3. 观察日志
 ```
 
-**升级**：`sudo honeyguard update` 一条命令完成（查最新 Release → 下载 → sha256 校验 → 原子替换 → 自动重启服务）；`honeyguard update --check` 只看有没有新版。国内节点直连 GitHub 不通时会自动回退公共加速镜像；也可显式配置 `server.update_mirror`（或环境变量 `HONEYGUARD_MIRROR`，如 `https://ghproxy.com/`），自建反代更稳更安全（sha256 校验防传输损坏，但镜像本身是信任点）。
+**升级**：默认开启**自动升级**——服务常驻期间每 6 小时（`[server.auto_update] interval_sec`）检查一次最新 Release，有新版即下载 → sha256 校验 → 原子替换 → 自动重启服务，并推送「已自动升级」通知；不想自动升级就 `enabled = false`，改用 `sudo honeyguard update` 手动执行（步骤相同，结果打印在终端）。`honeyguard update --check` 只看有没有新版。国内节点直连 GitHub 不通时会自动回退公共加速镜像；也可显式配置 `server.update_mirror`（或环境变量 `HONEYGUARD_MIRROR`，如 `https://ghproxy.com/`），自建反代更稳更安全（sha256 校验防传输损坏，但镜像本身是信任点——自动升级同样沿用这条镜像链）。
+
+**启动/重启上报**：honeyguard 每次启动都会推送一条通知，不受 `min_level` 影响：区分首次启动、服务重启、机器重启（boot_id 变化）与「上次运行未正常退出后被拉起」（后者为 warning），并写出版本变化（如 `版本 v0.3.3（上次运行 v0.3.2）`）和离线期间积压的告警数。正常重启始终逐条上报；崩溃循环（异常退出后被反复拉起）时 5 分钟内只推送第一条，其余只计数并并入下一条上报，不刷屏。
 
 **自动封禁（SSH 爆破响应）**：在 `[detector.ssh_bruteforce.ban]` 里 `enabled = true` 即启用——`window_sec` 内同一 IP 认证失败达到 `max_failures` 次时，除 critical 告警外自动把该 IP 写入防火墙（默认封 1 小时，`duration_sec` 可改，0 为永久）。规则放在 `HONEYGUARD` 专用链 / `honeyguard` 专用表，不与 ufw/firewalld 等已有配置冲突；封禁记录持久化，机器重启后自动恢复未到期封禁。回环/内网地址默认拒绝封禁（`allow_private` 可放开），建议先把自己的常用 IP 加进 `whitelist.ips` 防锁门。管理命令：`honeyguard bans`（列表对账）、`honeyguard unban <IP>`（应急解封，误伤自救）、`honeyguard ban <IP>`（手动封禁）。
 
